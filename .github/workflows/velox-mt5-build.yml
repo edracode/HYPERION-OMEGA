@@ -1,0 +1,51 @@
+name: Build VeloxAurkaeon EA
+on:
+  push:
+    branches: [velox-mt5-backtest]
+    paths:
+      - 'VeloxAurkaeon-MT5-Backtest/MQL5/Experts/VeloxAurkaeon/**'
+      - '.github/workflows/velox-mt5-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  metaeditor:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MetaTrader 5 and locate MetaEditor
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "mt5setup.exe"
+          $terminal = Join-Path $env:RUNNER_TEMP "MetaTrader5"
+          Invoke-WebRequest -Uri "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe" -OutFile $installer
+          $signature = Get-AuthenticodeSignature $installer
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'MetaQuotes') {
+            throw "MetaQuotes installer signature could not be validated"
+          }
+          Start-Process $installer -ArgumentList "/auto /path:`"$terminal`"" -Wait
+          $editor = Join-Path $terminal "metaeditor64.exe"
+          if (!(Test-Path $editor)) {
+            $editor = Join-Path $env:ProgramFiles "MetaTrader 5\metaeditor64.exe"
+          }
+          if (!(Test-Path $editor)) { throw "MetaEditor installation did not finish" }
+          "VELOX_METAEDITOR=$editor" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Compile Expert Advisor
+        shell: pwsh
+        run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE "VeloxAurkaeon-MT5-Backtest\MQL5\Experts\VeloxAurkaeon\VeloxAurkaeonBacktest.mq5"
+          $output = [IO.Path]::ChangeExtension($source, ".ex5")
+          $log = Join-Path $env:RUNNER_TEMP "velox-compile.log"
+          Start-Process $env:VELOX_METAEDITOR -ArgumentList "/compile:`"$source`" /log:`"$log`"" -Wait
+          if (Test-Path $log) { Get-Content $log }
+          if (!(Test-Path $output)) { throw "MetaEditor produced no EX5" }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: VeloxAurkaeon-MT5-Backtest-MetaEditor
+          path: |
+            VeloxAurkaeon-MT5-Backtest/MQL5/Experts/VeloxAurkaeon/*.ex5
+            ${{ runner.temp }}/velox-compile.log
+          if-no-files-found: error
