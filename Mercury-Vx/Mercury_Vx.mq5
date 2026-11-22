@@ -1,5 +1,5 @@
 #property strict
-#property version     "1.10"
+#property version     "1.20"
 #property description "Mercury Vx | MT5 tick and minute scalper"
 #include <Trade/Trade.mqh>
 
@@ -10,13 +10,21 @@ enum MercuryExecution
    ENABLE_REAL = 2
   };
 
+enum MercurySignal
+  {
+   AUTO_BY_SYMBOL = 0,
+   LEGACY_MICRO = 1,
+   XAU_MEAN_REVERSION = 2,
+   BTC_WICK_RECLAIM = 3
+  };
+
 input group "Execution"
 input MercuryExecution ExecutionMode = TESTER_ONLY;
 input ulong MagicNumber = 60261122;
 input int MaxDeviationPoints = 20;
 input int DecisionIntervalSeconds = 2;
 input int CooldownSeconds = 20;
-input int MaxHoldSeconds = 180; // 0 keeps the broker-side SL and TP as the normal exits.
+input int MaxHoldSeconds = 180; // LEGACY_MICRO only. 0 disables the time exit.
 input int SessionStartHour = 0;
 input int SessionEndHour = 0;   // Same as start means all hours. Broker server time.
 
@@ -30,6 +38,7 @@ input double MaxSpreadToAtr = 0.25;
 input double CommissionPerLotRoundTrip = 0.0; // Account currency.
 
 input group "Signal"
+input MercurySignal SignalModel = AUTO_BY_SYMBOL;
 input double MinimumSignal = 0.32;
 input double MinimumMicroSignal = 0.13;
 input double MinimumTrendAlignment = 0.15; // Set to 0 to use the previous directional filter.
@@ -38,7 +47,8 @@ input double OpposingTrendLimit = 0.20;
 input group "Backtest report"
 input int MinimumReportTrades = 100;
 input int MinimumReportDays = 20;
-input bool ExportDailyCsv = true;
+input bool ExportAnnualCsv = true;
+input bool ExportDailyCsv = false;
 
 #define FRAME_COUNT 4
 #define PERIOD_COUNT 128
@@ -76,12 +86,35 @@ struct EntryDiagnostics
    int spread;
    int contract;
    int sizeOrMargin;
+   int equityFloor;
    int rejected;
    int accepted;
   };
 
+struct YearSummary
+  {
+   int year;
+   datetime firstTick;
+   datetime lastTick;
+   long tickCount;
+   int entryDeals;
+   int exitDeals;
+   double startEquity;
+   double endEquity;
+   double peak;
+   double maxDrawdownPct;
+  };
+
 CTrade trade;
 EntryDiagnostics diagnostics;
+YearSummary testYears[];
+int activeYearIndex = -1;
+datetime coverageDay = 0;
+datetime firstTestTick = 0;
+datetime lastTestTick = 0;
+datetime firstEntryDeal = 0;
+datetime lastExitDeal = 0;
+long observedTickCount = 0;
 ENUM_TIMEFRAMES timeframes[FRAME_COUNT] = {PERIOD_M1, PERIOD_M2, PERIOD_M3, PERIOD_M5};
 double frameWeight[FRAME_COUNT] = {0.46, 0.25, 0.17, 0.12};
 FrameSignal frames[FRAME_COUNT];
@@ -99,6 +132,11 @@ int priceDigits = 0;
 double lotMin = 0.0;
 double lotMax = 0.0;
 double lotStep = 0.0;
+MercurySignal signalInUse = LEGACY_MICRO;
+int positionMaxSeconds = 0;
+double entryStopMultiple = 0.0;
+double entryMaxSpreadToRisk = 0.0;
+datetime seenMinute = 0;
 long nextDecision = 0;
 long nextEntry = 0;
 long nextClose = 0;
@@ -310,6 +348,75 @@ int ChooseDirection(const double micro, string &setup)
    return best >= MinimumSignal ? direction : 0;
   }
 
+void ConfigureSignal()
+  {
+   signalInUse = SignalModel;
+   if(signalInUse == AUTO_BY_SYMBOL)
+     {
+      const string base = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
+      const string quote = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
+      if(base == "XAU" && quote == "USD")
+         signalInUse = XAU_MEAN_REVERSION;
+      else if(base == "BTC" && quote == "USD")
+         signalInUse = BTC_WICK_RECLAIM;
+      else
+         signalInUse = LEGACY_MICRO;
+     }
+   positionMaxSeconds = MaxHoldSeconds;
+   entryStopMultiple = StopAtrMultiple;
+   entryMaxSpreadToRisk = MaxSpreadToRisk;
+   if(signalInUse == XAU_MEAN_REVERSION)
+     {
+      positionMaxSeconds = 720;
+      entryStopMultiple = 1.00;
+      entryMaxSpreadToRisk = 0.14;
+     }
+   else if(signalInUse == BTC_WICK_RECLAIM)
+     {
+      positionMaxSeconds = 300;
+      entryStopMultiple = 1.80;
+      entryMaxSpreadToRisk = 0.10;
+     }
+  }
+
+int ChooseBarDirection(const MqlRates &bars[], const double atr)
+  {
+   const double width = bars[0].high - bars[0].low;
+   if(width <= 0.0)
+      return 0;
+   const double closeLocation = (bars[0].close - bars[0].low) / width;
+   if(signalInUse == XAU_MEAN_REVERSION)
+     {
+      double mean = 0.0;
+      for(int i = 1; i <= 24; ++i)
+         mean += bars[i].close;
+      mean /= 24.0;
+      const double distance = (bars[0].close - mean) / (MathSqrt(24.0) * atr);
+      const double change = (bars[0].close - bars[1].close) / atr;
+      if(distance > 0.65 && change < -0.18 && closeLocation < 0.60)
+         return -1;
+      if(distance < -0.65 && change > 0.18 && closeLocation > 0.40)
+         return 1;
+      return 0;
+     }
+
+   const double body = bars[0].close - bars[0].open;
+   if(width <= 1.25 * atr || body == 0.0)
+      return 0;
+   const double trend = (bars[1].close - bars[49].close) / (7.0 * atr);
+   const int direction = body > 0.0 ? 1 : -1;
+   if(direction * trend <= -0.5 || direction * (closeLocation - 0.5) <= 0.28)
+      return 0;
+   const double level = direction > 0 ? bars[0].low : bars[0].high;
+   for(int i = 1; i <= 48; ++i)
+     {
+      const double previousLevel = direction > 0 ? bars[i].low : bars[i].high;
+      if(direction * (previousLevel - level) <= 0.0)
+         return 0;
+     }
+   return direction;
+  }
+
 uint HashText(const string value)
   {
    uint hash = 2166136261;
@@ -320,11 +427,11 @@ uint HashText(const string value)
 
 bool InTradingSession(const datetime when)
   {
+   if(SessionStartHour == SessionEndHour)
+      return true;
    MqlDateTime parts;
    if(!TimeToStruct(when, parts))
       return false;
-   if(SessionStartHour == SessionEndHour)
-      return true;
    if(SessionStartHour < SessionEndHour)
       return parts.hour >= SessionStartHour && parts.hour < SessionEndHour;
    return parts.hour >= SessionStartHour || parts.hour < SessionEndHour;
@@ -384,6 +491,61 @@ void UpdateDay(const datetime when)
          GlobalVariableSet(dayKey + ".halt", 1.0);
       Print("Mercury Vx | daily equity loss limit reached for ", _Symbol);
      }
+  }
+
+int FindYear(const int year)
+  {
+   for(int i = ArraySize(testYears) - 1; i >= 0; --i)
+      if(testYears[i].year == year)
+         return i;
+   return -1;
+  }
+
+void MarkAnnualEquity(const double equity)
+  {
+   if(activeYearIndex < 0)
+      return;
+   testYears[activeYearIndex].endEquity = equity;
+   const double peak = MathMax(testYears[activeYearIndex].peak, equity);
+   testYears[activeYearIndex].peak = peak;
+   if(peak > 0.0)
+      testYears[activeYearIndex].maxDrawdownPct =
+         MathMax(testYears[activeYearIndex].maxDrawdownPct, 100.0 * (peak - equity) / peak);
+  }
+
+void ObserveTestTick(const datetime when, const double previousEquity, const double equity)
+  {
+   if(!inTester || inOptimization)
+      return;
+   if(firstTestTick == 0)
+      firstTestTick = when;
+   lastTestTick = when;
+   ++observedTickCount;
+   if(coverageDay != activeDay)
+     {
+      coverageDay = activeDay;
+      MqlDateTime parts;
+      if(!TimeToStruct(when, parts))
+         return;
+      activeYearIndex = FindYear(parts.year);
+      if(activeYearIndex < 0)
+        {
+         const int slot = ArraySize(testYears);
+         if(ArrayResize(testYears, slot + 1, 16) != slot + 1)
+            return;
+         ZeroMemory(testYears[slot]);
+         activeYearIndex = slot;
+         testYears[slot].year = parts.year;
+         testYears[slot].firstTick = when;
+         testYears[slot].startEquity = observedTickCount == 1 ? equity : previousEquity;
+         testYears[slot].peak = testYears[slot].startEquity;
+        }
+     }
+   if(activeYearIndex < 0)
+      return;
+   testYears[activeYearIndex].lastTick = when;
+   ++testYears[activeYearIndex].tickCount;
+   MarkAnnualEquity(equity);
   }
 
 double DrawdownFloor()
@@ -448,11 +610,18 @@ double RiskBudget(const double equity)
 
 double OrderVolume(const int direction, const double entry, const double stop)
   {
-   const double riskBudget = RiskBudget(AccountInfoDouble(ACCOUNT_EQUITY)) * SizingReserve;
+   const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   const double riskBudget = RiskBudget(equity) * SizingReserve;
    double minimumRisk = 0.0;
-   if(riskBudget <= 0.0 || !RiskCash(direction, lotMin, entry, stop, minimumRisk) ||
-      minimumRisk > riskBudget)
+   if(!RiskCash(direction, lotMin, entry, stop, minimumRisk))
       return 0.0;
+   if(minimumRisk > riskBudget)
+     {
+      const double floor = DrawdownFloor();
+      if(floor > 0.0 && minimumRisk > SizingReserve * (equity - floor))
+         ++diagnostics.equityFloor;
+      return 0.0;
+     }
    const double raw = MathMin(lotMax, lotMin * riskBudget / minimumRisk);
    return NormalizeDouble(lotMin + MathFloor((raw - lotMin) / lotStep + 1e-8) * lotStep, 8);
   }
@@ -541,7 +710,7 @@ bool ManagePosition(const MqlTick &tick, const long second)
          ClosePosition(ticket, second, blockedToday ? "daily equity limit" : "missing protective order");
          continue;
         }
-      if(MaxHoldSeconds > 0 && second - PositionGetInteger(POSITION_TIME) >= MaxHoldSeconds)
+      if(positionMaxSeconds > 0 && second - PositionGetInteger(POSITION_TIME) >= positionMaxSeconds)
         {
          ClosePosition(ticket, second, "time exit");
          continue;
@@ -605,7 +774,7 @@ bool SymbolHasOrder()
    return false;
   }
 
-void Enter(const int direction, const MqlTick &tick, const long second, const string setup)
+void Enter(const int direction, const MqlTick &tick, const long second, const string setup, const double atr)
   {
    if(!CanTrade(direction) || SymbolHasOrder())
      {
@@ -613,7 +782,6 @@ void Enter(const int direction, const MqlTick &tick, const long second, const st
       return;
      }
    const double spread = tick.ask - tick.bid;
-   const double atr = frames[0].atr;
    if(spread > atr * MaxSpreadToAtr)
      {
       ++diagnostics.spread;
@@ -621,9 +789,9 @@ void Enter(const int direction, const MqlTick &tick, const long second, const st
      }
 
    const double gap = BrokerGap(SYMBOL_TRADE_STOPS_LEVEL);
-   const double distance = MathMax(atr * StopAtrMultiple, spread + gap);
+   const double distance = MathMax(atr * entryStopMultiple, spread + gap);
    const long riskTicks = (long)MathCeil(distance / tickSize - 1e-8);
-   if(riskTicks <= 0 || spread > riskTicks * tickSize * MaxSpreadToRisk)
+   if(riskTicks <= 0 || spread > riskTicks * tickSize * entryMaxSpreadToRisk)
      {
       ++diagnostics.spread;
       return;
@@ -785,9 +953,18 @@ int OnInit()
    takeProfitDeals = 0;
    otherExitDeals = 0;
    acceptedTimeExits = 0;
-   PrintFormat("Mercury Vx 1.10 | %s | %d indicator variants | %d strategy combinations",
-               _Symbol, FAMILY_COUNT * PERIOD_COUNT * FRAME_COUNT,
-               SETUP_COUNT * PERIOD_COUNT * FRAME_COUNT);
+   ArrayResize(testYears, 0);
+   ConfigureSignal();
+   seenMinute = 0;
+   activeYearIndex = -1;
+   coverageDay = 0;
+   firstTestTick = 0;
+   lastTestTick = 0;
+   firstEntryDeal = 0;
+   lastExitDeal = 0;
+   observedTickCount = 0;
+   PrintFormat("Mercury Vx 1.20 | %s | Signal=%s | Hold=%d seconds | SL=%.2f ATR | Spread/SL<=%.2f",
+               _Symbol, EnumToString(signalInUse), positionMaxSeconds, entryStopMultiple, entryMaxSpreadToRisk);
    return INIT_SUCCEEDED;
   }
 
@@ -805,14 +982,51 @@ void OnDeinit(const int reason)
      }
   }
 
+void EvaluateBarEntry(const MqlTick &tick, const long second, const datetime minute)
+  {
+   MqlRates bars[];
+   ArraySetAsSeries(bars, true);
+   const int count = signalInUse == XAU_MEAN_REVERSION ? 25 : 50;
+   if(CopyRates(_Symbol, PERIOD_M1, 1, count, bars) != count || bars[0].time != minute - 60)
+     {
+      ++diagnostics.history;
+      return;
+     }
+   const double atr = AverageTrueRange(bars);
+   if(!MathIsValidNumber(atr) || atr <= 0.0)
+     {
+      ++diagnostics.history;
+      return;
+     }
+   const int direction = ChooseBarDirection(bars, atr);
+   if(direction == 0)
+     {
+      ++diagnostics.signal;
+      return;
+     }
+   const string setup = signalInUse == XAU_MEAN_REVERSION ? "XAU mean reversion" : "BTC wick reclaim";
+   Enter(direction, tick, second, setup, atr);
+  }
+
 void EvaluateEntry(const MqlTick &tick, const long second, const double mid)
   {
+   const datetime minute = (datetime)((long)tick.time / 60 * 60);
+   const bool newMinute = minute != seenMinute;
+   seenMinute = minute;
    if(ManagePosition(tick, second) || blockedToday || blockedByDrawdown ||
-      second < nextEntry || second < nextDecision)
+      second < nextEntry)
       return;
-   nextDecision = second + DecisionIntervalSeconds;
+   if(signalInUse == LEGACY_MICRO ? second < nextDecision : !newMinute)
+      return;
+   if(signalInUse == LEGACY_MICRO)
+      nextDecision = second + DecisionIntervalSeconds;
    if(!InTradingSession(tick.time))
       return;
+   if(signalInUse != LEGACY_MICRO)
+     {
+      EvaluateBarEntry(tick, second, minute);
+      return;
+     }
    if(!RefreshFrames())
      {
       ++diagnostics.history;
@@ -827,7 +1041,7 @@ void EvaluateEntry(const MqlTick &tick, const long second, const double mid)
    string setup = "";
    const int direction = ChooseDirection(micro, setup);
    if(direction != 0)
-      Enter(direction, tick, second, setup);
+      Enter(direction, tick, second, setup, frames[0].atr);
    else
       ++diagnostics.signal;
   }
@@ -839,7 +1053,8 @@ void OnTick()
       return;
    const long second = tick.time_msc > 0 ? tick.time_msc / 1000 : (long)tick.time;
    const double mid = (tick.ask + tick.bid) / 2.0;
-   RecordQuote(second, mid);
+   if(signalInUse == LEGACY_MICRO)
+      RecordQuote(second, mid);
 
    if(inTester && !inOptimization && ExportDailyCsv && activeDay == 0)
      {
@@ -855,38 +1070,107 @@ void OnTick()
          PrintFormat("Mercury Vx | failed to open daily CSV | error %d", GetLastError());
      }
 
+   const double previousEquity = lastEquity;
    UpdateDay(tick.time);
+   ObserveTestTick(tick.time, previousEquity, lastEquity);
    UpdateDrawdown(lastEquity);
    EvaluateEntry(tick, second, mid);
    lastEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   MarkAnnualEquity(lastEquity);
   }
 
-void OnTradeTransaction(const MqlTradeTransaction &transaction, const MqlTradeRequest &request,
-                        const MqlTradeResult &result)
+void SummarizeTesterDeals()
   {
-   if(!inTester || inOptimization || transaction.type != TRADE_TRANSACTION_DEAL_ADD ||
-      transaction.deal == 0 || !HistoryDealSelect(transaction.deal))
+   if(firstTestTick == 0 || !HistorySelect(firstTestTick, TimeCurrent()))
       return;
-   const ulong deal = transaction.deal;
-   if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol ||
-      (ulong)HistoryDealGetInteger(deal, DEAL_MAGIC) != MagicNumber)
+   const int total = HistoryDealsTotal();
+   for(int i = 0; i < total; ++i)
+     {
+      const ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0 || HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol)
+         continue;
+      const long type = HistoryDealGetInteger(deal, DEAL_TYPE);
+      if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL)
+         continue;
+      const datetime when = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+      MqlDateTime parts;
+      if(!TimeToStruct(when, parts))
+         continue;
+      const int slot = FindYear(parts.year);
+      const long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_IN || entry == DEAL_ENTRY_INOUT)
+        {
+         if(firstEntryDeal == 0 || when < firstEntryDeal)
+            firstEntryDeal = when;
+         if(slot >= 0)
+            ++testYears[slot].entryDeals;
+        }
+      if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY || entry == DEAL_ENTRY_INOUT)
+        {
+         if(when > lastExitDeal)
+            lastExitDeal = when;
+         if(slot >= 0)
+            ++testYears[slot].exitDeals;
+         const long reason = HistoryDealGetInteger(deal, DEAL_REASON);
+         if(reason == DEAL_REASON_SL)
+            ++stopLossDeals;
+         else if(reason == DEAL_REASON_TP)
+            ++takeProfitDeals;
+         else
+            ++otherExitDeals;
+        }
+     }
+  }
+
+string ReportDate(const datetime when)
+  {
+   return when > 0 ? TimeToString(when, TIME_DATE | TIME_SECONDS) : "n/a";
+  }
+
+void WriteAnnualReport()
+  {
+   if(firstTestTick == 0)
       return;
-   const long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
-   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
+   PrintFormat("Mercury Vx | Coverage | FirstTick=%s LastTick=%s ObservedTicks=%I64d FirstEntry=%s LastExit=%s",
+               ReportDate(firstTestTick), ReportDate(lastTestTick), observedTickCount,
+               ReportDate(firstEntryDeal), ReportDate(lastExitDeal));
+   if(!ExportAnnualCsv)
       return;
-   const long reason = HistoryDealGetInteger(deal, DEAL_REASON);
-   if(reason == DEAL_REASON_SL)
-      ++stopLossDeals;
-   else if(reason == DEAL_REASON_TP)
-      ++takeProfitDeals;
-   else
-      ++otherExitDeals;
+   const string name = "Mercury_Vx_Annual_" + IntegerToString((long)HashText(_Symbol)) + "_" +
+                       IntegerToString((long)GetTickCount64()) + ".csv";
+   const int file = FileOpen(name, FILE_COMMON | FILE_WRITE | FILE_CSV | FILE_ANSI, ';');
+   if(file == INVALID_HANDLE)
+     {
+      PrintFormat("Mercury Vx | failed to open annual CSV | error %d", GetLastError());
+      return;
+     }
+   FileWrite(file, "symbol", "server_year", "first_tick", "last_tick", "observed_ticks",
+             "entry_deals", "exit_deals", "start_equity", "end_equity", "net_equity",
+             "return_pct", "max_equity_drawdown_pct");
+   for(int i = 0; i < ArraySize(testYears); ++i)
+     {
+      const double start = testYears[i].startEquity;
+      const double end = testYears[i].endEquity;
+      const string change = start > 0.0 ? DoubleToString(100.0 * (end / start - 1.0), 6) : "";
+      FileWrite(file, _Symbol, testYears[i].year, ReportDate(testYears[i].firstTick), ReportDate(testYears[i].lastTick),
+                testYears[i].tickCount, testYears[i].entryDeals, testYears[i].exitDeals, DoubleToString(start, 2),
+                DoubleToString(end, 2), DoubleToString(end - start, 2), change,
+                DoubleToString(testYears[i].maxDrawdownPct, 6));
+     }
+   FileClose(file);
+   Print("Mercury Vx | annual CSV at ", TerminalInfoString(TERMINAL_COMMONDATA_PATH), "\\Files\\", name);
   }
 
 double OnTester()
   {
    const double endingEquity = AccountInfoDouble(ACCOUNT_EQUITY);
    WriteDay(endingEquity);
+   if(!inOptimization)
+     {
+      MarkAnnualEquity(endingEquity);
+      SummarizeTesterDeals();
+      WriteAnnualReport();
+     }
    const double trades = TesterStatistics(STAT_TRADES);
    const double wins = TesterStatistics(STAT_PROFIT_TRADES);
    const double losses = TesterStatistics(STAT_LOSS_TRADES);
@@ -915,14 +1199,18 @@ double OnTester()
    PrintFormat("Mercury Vx | Exit deals | SL=%d TP=%d Other=%d | AcceptedTimeExitRequests=%d | DrawdownHalt=%s",
                stopLossDeals, takeProfitDeals, otherExitDeals, acceptedTimeExits,
                blockedByDrawdown ? "YES" : "NO");
-   const string worst = hasDayReturn ? DoubleToString(worstDayPct, 4) + "%" : "n/a";
-   PrintFormat("Mercury Vx | Days >= 50%%: %d/%d | Worst day=%s | Sample=%s | Targets=%s",
-               daysAtTarget, daysObserved, worst,
-               enoughSample ? "ENOUGH" : "BELOW CONFIGURED MINIMUM",
-               pass ? "PASS" : "FAIL");
+   if(ExportDailyCsv)
+     {
+      const string worst = hasDayReturn ? DoubleToString(worstDayPct, 4) + "%" : "n/a";
+      PrintFormat("Mercury Vx | Days >= 50%%: %d/%d | Worst day=%s | Sample=%s | Targets=%s",
+                  daysAtTarget, daysObserved, worst,
+                  enoughSample ? "ENOUGH" : "BELOW CONFIGURED MINIMUM",
+                  pass ? "PASS" : "FAIL");
+     }
    PrintFormat("Mercury Vx | Entry checks | History=%d TickWindow=%d Signal=%d Spread=%d Contract=%d SizeOrMargin=%d Rejected=%d Accepted=%d",
                diagnostics.history, diagnostics.tickWindow, diagnostics.signal, diagnostics.spread,
                diagnostics.contract, diagnostics.sizeOrMargin, diagnostics.rejected, diagnostics.accepted);
+   PrintFormat("Mercury Vx | Entry checks | MinLotAboveDrawdownBudget=%d", diagnostics.equityFloor);
    if(csv != INVALID_HANDLE)
       FileFlush(csv);
 
