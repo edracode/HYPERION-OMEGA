@@ -1,5 +1,5 @@
 #property strict
-#property version     "1.00"
+#property version     "1.10"
 #property description "Mercury Vx | MT5 tick and minute scalper"
 #include <Trade/Trade.mqh>
 
@@ -21,16 +21,18 @@ input int SessionStartHour = 0;
 input int SessionEndHour = 0;   // Same as start means all hours. Broker server time.
 
 input group "Position risk"
-input double RiskPerTradePct = 0.50;
-input double DailyLossLimitPct = 3.00;
+input double RiskPerTradePct = 0.25;
+input double DailyLossLimitPct = 2.00;
+input double MaxEquityDrawdownPct = 10.00; // 0 disables the peak-equity limit.
 input double StopAtrMultiple = 0.65;
-input double MaxSpreadToRisk = 0.30;
+input double MaxSpreadToRisk = 0.20;
 input double MaxSpreadToAtr = 0.25;
 input double CommissionPerLotRoundTrip = 0.0; // Account currency.
 
 input group "Signal"
 input double MinimumSignal = 0.32;
 input double MinimumMicroSignal = 0.13;
+input double MinimumTrendAlignment = 0.15; // Set to 0 to use the previous directional filter.
 input double OpposingTrendLimit = 0.20;
 
 input group "Backtest report"
@@ -90,7 +92,7 @@ double microWeight[3] = {0.45, 0.35, 0.20};
 bool inTester = false;
 bool inOptimization = false;
 bool ownsLock = false;
-string accountKey, lockKey, dayKey;
+string accountKey, lockKey, dayKey, peakKey;
 double tickSize = 0.0;
 double pointSize = 0.0;
 int priceDigits = 0;
@@ -115,6 +117,12 @@ datetime activeDay = 0;
 double dayStartEquity = 0.0;
 double lastEquity = 0.0;
 bool blockedToday = false;
+double peakEquity = 0.0;
+bool blockedByDrawdown = false;
+int stopLossDeals = 0;
+int takeProfitDeals = 0;
+int otherExitDeals = 0;
+int acceptedTimeExits = 0;
 
 double Unit(const double value)
   {
@@ -268,6 +276,9 @@ int ChooseDirection(const double micro, string &setup)
    const double higherTrend = 0.58 * frames[2].trend + 0.42 * frames[3].trend;
    if(direction * higherTrend < -OpposingTrendLimit)
       return 0;
+   if(MinimumTrendAlignment > 0.0 &&
+      MathMin(direction * frames[0].trend, direction * higherTrend) < MinimumTrendAlignment)
+      return 0;
 
    double trend = 0.0, breakout = 0.0, pullback = 0.0;
    for(int i = 0; i < FRAME_COUNT; ++i)
@@ -375,6 +386,31 @@ void UpdateDay(const datetime when)
      }
   }
 
+double DrawdownFloor()
+  {
+   return MaxEquityDrawdownPct > 0.0 ? peakEquity * (1.0 - MaxEquityDrawdownPct / 100.0) : 0.0;
+  }
+
+void UpdateDrawdown(const double equity)
+  {
+   if(MaxEquityDrawdownPct <= 0.0 || blockedByDrawdown)
+      return;
+   if(equity > peakEquity)
+     {
+      peakEquity = equity;
+      if(!inTester)
+         GlobalVariableSet(peakKey, peakEquity);
+     }
+   if(peakEquity > 0.0 && equity <= DrawdownFloor())
+     {
+      blockedByDrawdown = true;
+      if(!inTester && GlobalVariableSet(peakKey, -peakEquity) != 0)
+         GlobalVariablesFlush();
+      PrintFormat("Mercury Vx | drawdown halt | peak=%.2f equity=%.2f configured=%.2f%%",
+                  peakEquity, equity, MaxEquityDrawdownPct);
+     }
+  }
+
 double GridPrice(const long ticks)
   {
    return NormalizeDouble(ticks * tickSize, priceDigits);
@@ -403,16 +439,16 @@ bool RiskCash(const int direction, const double volume, const double entry,
    return MathIsValidNumber(cash) && cash > 0.0;
   }
 
-double RiskBudget()
+double RiskBudget(const double equity)
   {
-   const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   const double remainingDayRisk = equity - dayStartEquity * (1.0 - DailyLossLimitPct / 100.0);
-   return MathMin(equity * RiskPerTradePct / 100.0, remainingDayRisk);
+   const double dailyFloor = dayStartEquity * (1.0 - DailyLossLimitPct / 100.0);
+   const double remainingRisk = equity - MathMax(dailyFloor, DrawdownFloor());
+   return MathMin(equity * RiskPerTradePct / 100.0, remainingRisk);
   }
 
 double OrderVolume(const int direction, const double entry, const double stop)
   {
-   const double riskBudget = RiskBudget() * SizingReserve;
+   const double riskBudget = RiskBudget(AccountInfoDouble(ACCOUNT_EQUITY)) * SizingReserve;
    double minimumRisk = 0.0;
    if(riskBudget <= 0.0 || !RiskCash(direction, lotMin, entry, stop, minimumRisk) ||
       minimumRisk > riskBudget)
@@ -459,7 +495,11 @@ void ClosePosition(const ulong ticket, const long second, const string reason)
    trade.PositionClose(ticket, (ulong)MaxDeviationPoints);
    const uint code = trade.ResultRetcode();
    if(Taken(code))
+     {
+      if(reason == "time exit")
+         ++acceptedTimeExits;
       PrintFormat("Mercury Vx | close #%I64u | %s", ticket, reason);
+     }
    else
       PrintFormat("Mercury Vx | close #%I64u rejected | %u %s",
                   ticket, code, trade.ResultRetcodeDescription());
@@ -491,6 +531,11 @@ bool ManagePosition(const MqlTick &tick, const long second)
       observedPosition = ticket;
       const double stop = PositionGetDouble(POSITION_SL);
       const double take = PositionGetDouble(POSITION_TP);
+      if(blockedByDrawdown)
+        {
+         ClosePosition(ticket, second, "peak equity drawdown limit");
+         continue;
+        }
       if(blockedToday || stop <= 0.0 || take <= 0.0)
         {
          ClosePosition(ticket, second, blockedToday ? "daily equity limit" : "missing protective order");
@@ -511,8 +556,7 @@ bool ManagePosition(const MqlTick &tick, const long second)
       double risk = 0.0;
       // The sizing budget is equity before entry. Rebuild it without the position's floating P/L.
       const double equityAtEntry = AccountInfoDouble(ACCOUNT_EQUITY) - PositionGetDouble(POSITION_PROFIT);
-      const double limit = MathMin(equityAtEntry * RiskPerTradePct / 100.0,
-                                   equityAtEntry - dayStartEquity * (1.0 - DailyLossLimitPct / 100.0));
+      const double limit = RiskBudget(equityAtEntry);
       if(!RiskCash(direction, filledVolume, entry, stop, risk) || risk > limit + 1e-7)
         {
          ClosePosition(ticket, second, "filled risk exceeds limit");
@@ -639,10 +683,12 @@ bool InputsValid()
           SessionStartHour >= 0 && SessionStartHour <= 23 && SessionEndHour >= 0 && SessionEndHour <= 23 &&
           RiskPerTradePct > 0.0 && RiskPerTradePct <= 100.0 &&
           DailyLossLimitPct > 0.0 && DailyLossLimitPct <= 100.0 && StopAtrMultiple > 0.0 &&
+          MaxEquityDrawdownPct >= 0.0 && MaxEquityDrawdownPct <= 100.0 &&
           MaxSpreadToRisk > 0.0 && MaxSpreadToRisk < 1.0 &&
           MaxSpreadToAtr > 0.0 && CommissionPerLotRoundTrip >= 0.0 &&
           MinimumSignal > 0.0 && MinimumSignal <= 1.0 &&
           MinimumMicroSignal > 0.0 && MinimumMicroSignal <= 1.0 &&
+          MinimumTrendAlignment >= 0.0 && MinimumTrendAlignment <= 1.0 &&
           OpposingTrendLimit >= 0.0 && OpposingTrendLimit <= 1.0 &&
           MinimumReportTrades >= 1 && MinimumReportDays >= 1;
   }
@@ -695,6 +741,8 @@ int OnInit()
       trade.SetTypeFilling(ORDER_FILLING_FOK);
      }
 
+   peakEquity = 0.0;
+   blockedByDrawdown = false;
    if(!inTester)
      {
       accountKey = "MercuryVx." + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "." +
@@ -706,6 +754,15 @@ int OnInit()
         {
          Print("Mercury Vx | another instance is already attached to this symbol in this terminal");
          return INIT_FAILED;
+        }
+      peakKey = accountKey + ".peak." + IntegerToString((long)HashText(IntegerToString((long)MagicNumber)));
+      double savedPeak = 0.0;
+      if(MaxEquityDrawdownPct > 0.0 && GlobalVariableGet(peakKey, savedPeak) && MathIsValidNumber(savedPeak))
+        {
+         peakEquity = MathAbs(savedPeak);
+         blockedByDrawdown = savedPeak < 0.0;
+         if(blockedByDrawdown)
+            Print("Mercury Vx | peak-equity drawdown halt restored for ", _Symbol);
         }
      }
 
@@ -724,7 +781,11 @@ int OnInit()
    nextDecision = 0;
    nextEntry = 0;
    nextClose = 0;
-   PrintFormat("Mercury Vx | %s | %d indicator variants | %d strategy combinations",
+   stopLossDeals = 0;
+   takeProfitDeals = 0;
+   otherExitDeals = 0;
+   acceptedTimeExits = 0;
+   PrintFormat("Mercury Vx 1.10 | %s | %d indicator variants | %d strategy combinations",
                _Symbol, FAMILY_COUNT * PERIOD_COUNT * FRAME_COUNT,
                SETUP_COUNT * PERIOD_COUNT * FRAME_COUNT);
    return INIT_SUCCEEDED;
@@ -746,7 +807,8 @@ void OnDeinit(const int reason)
 
 void EvaluateEntry(const MqlTick &tick, const long second, const double mid)
   {
-   if(ManagePosition(tick, second) || blockedToday || second < nextEntry || second < nextDecision)
+   if(ManagePosition(tick, second) || blockedToday || blockedByDrawdown ||
+      second < nextEntry || second < nextDecision)
       return;
    nextDecision = second + DecisionIntervalSeconds;
    if(!InTradingSession(tick.time))
@@ -794,8 +856,31 @@ void OnTick()
      }
 
    UpdateDay(tick.time);
+   UpdateDrawdown(lastEquity);
    EvaluateEntry(tick, second, mid);
    lastEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+  }
+
+void OnTradeTransaction(const MqlTradeTransaction &transaction, const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+  {
+   if(!inTester || inOptimization || transaction.type != TRADE_TRANSACTION_DEAL_ADD ||
+      transaction.deal == 0 || !HistoryDealSelect(transaction.deal))
+      return;
+   const ulong deal = transaction.deal;
+   if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol ||
+      (ulong)HistoryDealGetInteger(deal, DEAL_MAGIC) != MagicNumber)
+      return;
+   const long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
+   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
+      return;
+   const long reason = HistoryDealGetInteger(deal, DEAL_REASON);
+   if(reason == DEAL_REASON_SL)
+      ++stopLossDeals;
+   else if(reason == DEAL_REASON_TP)
+      ++takeProfitDeals;
+   else
+      ++otherExitDeals;
   }
 
 double OnTester()
@@ -803,17 +888,33 @@ double OnTester()
    const double endingEquity = AccountInfoDouble(ACCOUNT_EQUITY);
    WriteDay(endingEquity);
    const double trades = TesterStatistics(STAT_TRADES);
-   const double winRate = trades > 0.0 ? 100.0 * TesterStatistics(STAT_PROFIT_TRADES) / trades : 0.0;
+   const double wins = TesterStatistics(STAT_PROFIT_TRADES);
+   const double losses = TesterStatistics(STAT_LOSS_TRADES);
+   const double winRate = trades > 0.0 ? 100.0 * wins / trades : 0.0;
    const double netProfit = TesterStatistics(STAT_PROFIT);
+   const double grossProfit = TesterStatistics(STAT_GROSS_PROFIT);
+   const double grossLoss = MathAbs(TesterStatistics(STAT_GROSS_LOSS));
    const double startingDeposit = TesterStatistics(STAT_INITIAL_DEPOSIT);
    const double netPct = startingDeposit > 0.0 ? 100.0 * netProfit / startingDeposit : 0.0;
    const double drawdown = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);
    const bool enoughSample = trades >= MinimumReportTrades && daysObserved >= MinimumReportDays;
    const bool dailyTargetMet = daysObserved > 0 && daysAtTarget == daysObserved;
    const bool winRateMet = winRate > WinRateTargetPct;
-   const bool pass = enoughSample && dailyTargetMet && winRateMet;
+   const bool profitable = netProfit > 0.0;
+   const bool pass = enoughSample && dailyTargetMet && winRateMet && profitable;
    PrintFormat("Mercury Vx | Trades=%.0f | WinRate=%.2f%% | Net=%.2f | EquityDD=%.2f%%",
                trades, winRate, netProfit, drawdown);
+   if(wins > 0.0 && losses > 0.0 && grossLoss > 0.0)
+     {
+      const double averageWin = grossProfit / wins;
+      const double averageLoss = grossLoss / losses;
+      PrintFormat("Mercury Vx | AvgWin=%.2f | AvgLoss=%.2f | RealizedRewardRisk=%.3f | BreakEvenWinsOrLosses=%.2f%% | ProfitFactor=%.3f",
+                  averageWin, averageLoss, averageWin / averageLoss,
+                  100.0 * averageLoss / (averageWin + averageLoss), grossProfit / grossLoss);
+     }
+   PrintFormat("Mercury Vx | Exit deals | SL=%d TP=%d Other=%d | AcceptedTimeExitRequests=%d | DrawdownHalt=%s",
+               stopLossDeals, takeProfitDeals, otherExitDeals, acceptedTimeExits,
+               blockedByDrawdown ? "YES" : "NO");
    const string worst = hasDayReturn ? DoubleToString(worstDayPct, 4) + "%" : "n/a";
    PrintFormat("Mercury Vx | Days >= 50%%: %d/%d | Worst day=%s | Sample=%s | Targets=%s",
                daysAtTarget, daysObserved, worst,
@@ -825,11 +926,10 @@ double OnTester()
    if(csv != INVALID_HANDLE)
       FileFlush(csv);
 
-   const double dayScore = daysObserved > 0 ? 1000.0 * daysAtTarget / daysObserved : 0.0;
-   const double score = dayScore + winRate + 100.0 * Unit(worstDayPct / 100.0) +
-                        50.0 * Unit(netPct / 100.0) -
-                        100.0 * Unit(drawdown / 100.0);
+   const double score = 100.0 * Unit(netPct / 100.0) - drawdown + 0.10 * winRate;
    if(!enoughSample)
+      return score - 20000.0;
+   if(!profitable)
       return score - 10000.0;
    return pass ? 10000.0 + score : score;
   }
