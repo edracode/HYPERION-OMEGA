@@ -1,50 +1,48 @@
-# Mercury Vx 1.50 Super Aggressive
+# Mercury Vx 1.51 — Patch pengujian tanpa batas waktu posisi
 
-Profil scalper eksperimental untuk Strategy Tester MT5. Sasaran pengujian adalah kenaikan ekuitas **≥50% pada setiap hari server yang memiliki tick**. Win rate dan risk:reward tetap dilaporkan dan tidak menjadi syarat kelulusan profil ini. **Kedua profil gagal pada pengujian yang dilaporkan di sini.**
+Patch ini mengubah aturan exit dan ukuran lot untuk profil Super Aggressive. **Belum ada profil yang memenuhi target +50% setiap hari bertick dan +85% bersih dalam 12 bulan.** Profil Super Aggressive tersedia untuk Strategy Tester.
 
-## Hasil di luar periode pemilihan
+## Perubahan di EA
 
-Replay lokal menggunakan 158.436.857 tick Bid/Ask dari arsip publik Exness untuk Juli–Oktober 2024 dan Januari–Oktober 2026. Setiap baris di bawah adalah satu pengujian berkelanjutan dengan modal awal US$1.000. [Arsip tick Exness](https://www.exness.com/tick-history/)
+- `AggressiveMaxHoldSeconds = 0` mematikan penutupan berdasarkan umur posisi. `AggressiveCloseBeforeMidnightMinutes = 0` mematikan penutupan menjelang tengah malam. Stop Loss, Take Profit, batas ekuitas harian, dan batas drawdown tetap berlaku.
+- `CommissionPerLotRoundTrip = 0` menetapkan asumsi komisi dalam perhitungan ukuran lot. `AggressiveSizingSpreadReserve = 0` mematikan cadangan spread tambahan pada estimasi risiko. EA tetap membaca Bid/Ask untuk transaksi, menyaring rasio spread terhadap jarak SL, dan menghormati biaya serta spesifikasi akun yang digunakan Strategy Tester.
+- Profil otomatis mengenali XAU dan BTC dengan mata uang laba USD atau USC. Ukuran lot dihitung memakai `OrderCalcProfit` dan `OrderCalcMargin` dalam mata uang akun dengan volume minimum, maksimum, dan langkah lot yang dibaca dari simbol. Sebelum mengirim order, EA memeriksa kembali risiko volume yang telah dibulatkan. Journal mencetak mata uang akun, kontrak, dan satuan lot. [OrderCalcProfit](https://www.mql5.com/en/docs/trading/ordercalcprofit) · [OrderCalcMargin](https://www.mql5.com/en/docs/trading/ordercalcmargin)
+- Profil manual menerima M1, M3, dan M5. Format Journal menampilkan `NetPct` bersama jumlah laba atau rugi dalam mata uang akun. Untuk tes beberapa tahun, ringkasan performa tahunan tersedia di CSV tahunan.
 
-| Profil | Periode | Trade | Hari untung | Hari rugi | Hari datar | Hari ≥50% | Laba bersih | Drawdown ekuitas |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| XAUUSDm M3 | Jan–Okt 2026 | 342 | 70 | 97 | 92 | **0/259** | −US$162,85 | 17,61% |
-| BTCUSDm M3 | Jan–Okt 2026 | 32 | 1 | 5 | 296 | **0/302** | −US$489,46 | 49,99% |
-| XAUUSDm M3 | Jul–Okt 2024 | 186 | 28 | 52 | 26 | **0/106** | −US$287,28 | 29,53% |
-| BTCUSDm M3 | Jul–Okt 2024 | 25 | 0 | 7 | 116 | **0/123** | −US$499,68 | 49,97% |
+## Uji langsung pengaruh batas tiga menit
 
-Pada tes Januari–Oktober 2026, hari terbaik kandidat XAUUSDm **+1,52%** dan kandidat BTCUSDm **+2,95%**. Biaya tambahan yang lebih tinggi menghasilkan rugi **US$215,70** pada emas dan **US$493,44** pada Bitcoin. Profil tambahan XAUUSDm M1 dengan risiko nominal 20% menghasilkan rugi **US$497,03** dan **0/259** hari mencapai target.
+Periode **November 2025–Oktober 2026**. Setiap pengujian berjalan dengan saldo awal setara **US$1.000**. Untuk setiap baris, aturan sinyal dan persentase risiko sama sebelum dan sesudah. Kolom pertama memakai batas umur posisi 180 detik dan penutupan tiga menit sebelum pergantian hari. Kolom kedua menonaktifkan keduanya.
 
-### Diagnostik dengan saldo direset setiap hari
+| Akun | Simbol | Exit berwaktu | Kedua batas waktu dimatikan | Hari ≥50% tanpa batas waktu |
+|---|---|---:|---:|---:|
+| Standard | XAUUSDm | −18,86% | −48,07% | 0/310 |
+| Standard | BTCUSDm | −34,14% | −42,89% | 0/363 |
+| Standard Cent | XAUUSDc | −22,88% | −47,29% | 0/308 |
+| Standard Cent | BTCUSDc | −47,80% | −46,53% | 0/364 |
 
-Untuk mengukur apakah batas drawdown kumulatif menjelaskan hasil tersebut, setiap hari Januari–Oktober 2026 juga diuji dengan saldo independen US$1.000. Pengujian ini hanya diagnostik. Hasil tiap hari tidak mewakili pertumbuhan satu rekening.
+Pada Standard, saya juga mematikan batas umur posisi sambil mempertahankan penutupan menjelang tengah malam. Hasil XAUUSDm **−48,26%** dan BTCUSDm **−42,89%**. Pada empat tes utama tanpa exit berbasis waktu, log mencatat **nol penutupan karena umur posisi dan nol penutupan karena jam**.
 
-| Profil | Hari ≥50% | Hari rugi | Hari terbaik |
+## Uji alternatif tanpa batas waktu
+
+Sebanyak 1.944 konfigurasi per simbol disaring pada data Standard Januari–Oktober 2025. Kandidat dikunci sebelum replay pada November 2025–Oktober 2026. Pencarian mencakup enam pola, M1/M3/M5, SL dan TP berbasis ATR, pilihan jam, dan risiko nominal 1%, 3%, atau 8%. Data Cent dipakai untuk replay kandidat terpilih, dengan tick dari simbol Cent.
+
+| Kandidat BTC M5 | Laba bersih 12 bulan | Drawdown ekuitas | Hari ≥50% |
 |---|---:|---:|---:|
-| XAUUSDm M3, risiko nominal 2% | 0/259 | 101 | +2,22% |
-| XAUUSDm M1, risiko nominal 20% | 1/259 | 155 | +52,28% |
-| BTCUSDm M3, risiko nominal 20% | 2/302 | 278 | +55,42% |
+| BTCUSDm, Standard | +37,54% | 50,00% | 1/363 |
+| BTCUSDc, Standard Cent | +51,44% | 50,00% | 1/364 |
+| BTCUSDc, biaya stres tambahan | +42,74% | 50,00% | 1/364 |
 
-Lihat [hasil_super_aggressive.csv](hasil_super_aggressive.csv) untuk semua pengujian. Kolom laba bersih pada baris `fresh_daily_tick` menjumlahkan hasil tes independen, dan kolom drawdown adalah maksimum intrahari yang diamati.
+Kandidat ini memakai `TREND_PULLBACK`, lookback 8 bar, SL 0,90 ATR, target harga 2,00 kali jarak SL, risiko nominal 8%, dan semua jam. Kandidat yang sama rugi **43,43%** pada BTCUSDm Juli–Oktober 2024. Kandidat emas rugi **23,61%** pada Standard dan **22,37%** pada Cent dalam pengujian 12 bulan. Angka lengkap termasuk transaksi yang melewati tengah malam ada di [hasil_uji_151.csv](hasil_uji_151.csv).
 
-### Cara pengujian
+### Asumsi dan cakupan
 
-- Sebanyak 1.296 kombinasi per simbol disaring pada bar satu menit untuk dua paruh 2025. Grid mencakup enam pola di M1 dan M3, tiga lookback, tiga jarak SL, tiga rasio TP terhadap SL, dan risiko nominal 2%, 6%, 12%, atau 20% per posisi. Mode scalper memakai maksimal 180 detik per posisi.
-- Tidak ada konfigurasi dengan sedikitnya 25 trade per paruh yang mencatat laba bersih positif di kedua paruh. Untuk replay lanjut, kandidat dengan sedikitnya 25 trade per paruh dipilih berdasarkan jumlah hari ≥50%, kemudian hasil di paruh terlemah. Pada penyaringan, Bitcoin mencapai paling banyak satu hari ≥50% per paruh. Emas tidak mencapai target pada paruh mana pun. Kandidat dikunci sebelum pengujian tick periode lain.
-- Replay memakai Bid/Ask historis, posisi tunggal, lot minimum dan langkah lot 0,01, leverage simulasi 1:100, margin maks. 80% dari saldo saat entri, dan pendekatan biaya tambahan 0,5 kali spread masuk. Tes stres memakai satu kali spread. Posisi yang menyeberangi tengah malam dikenai pendekatan biaya inap 0,035 R per hari. Komisi broker, stop level, delay, margin historis, dan aturan penutupan paksa di MT5 dapat berbeda. Gap harga dapat menyebabkan rugi melewati batas yang disetel.
-- Logika sinyal, konfigurasi profil, harga TP, dan syarat kelulusan diperiksa dengan uji C++. Kompilasi native dan hasil Strategy Tester MT5 belum diverifikasi.
+Replay lokal menggunakan 267.662.960 tick Bid/Ask dari arsip Exness, termasuk feed Standard dan Cent masing-masing. Pengujian utama menggunakan spread historis tanpa komisi tambahan dan dengan skenario swap nol. Model menggunakan leverage 1:100, lot minimum dan langkah lot 0,01 serta kontrak per simbol. Skenario biaya tambahan memakai 0,25 kali spread masuk dan beban inap sebesar 0,035 kali jarak risiko per pergantian hari UTC. Margin historis, swap dan delay broker dapat menghasilkan hasil berbeda di MT5. Gap harga dapat membuat drawdown melebihi batas yang disetel. [Arsip tick Exness](https://www.exness.com/tick-history/)
 
-## Profil dan pengujian di MT5
+Exness mencantumkan spread akun Standard **mulai 0,2 pip** dan Standard Cent **mulai 0,3 pip**, keduanya bebas komisi. Itu adalah angka mulai untuk jenis akun. Replay membaca setiap perubahan spread pada tick simbol yang diuji. Exness memakai akhiran `m` untuk Standard dan `c` untuk Standard Cent, dengan BTCUSDc tersedia di MT5. [Spesifikasi akun Exness](https://get.exness.help/hc/id/articles/360013782240-Jenis-akun-trading) · [Akun Standard Cent](https://get.exness.help/hc/id/articles/17537782786588-Akun-Standar-Cent)
 
-| Simbol | Profil otomatis | Timeframe | Stop loss | Target harga | Risiko nominal |
-|---|---|---|---:|---:|---:|
-| XAUUSDm | Pembalikan setelah gerak ekstrem, lookback 16 | M3 | 2,00 ATR | 1:1,35 | 2% |
-| BTCUSDm | Pembalikan wick, lookback 8 | M3 | 0,80 ATR | 1:0,80 | 20% |
+## Memeriksa di MT5
 
-EA membatasi ukuran posisi menggunakan anggaran risiko, lot minimum, margin, dan spread. Batas bawaan adalah rugi ekuitas harian 25% dan drawdown kumulatif dari puncak ekuitas 50%. Risiko nominal 20% dapat menyebabkan kerugian besar dalam beberapa transaksi. Waktu tunggu antarposisi 30 detik. EA berhenti membuka posisi pada hari itu jika ekuitas telah mencapai +50% dan posisi sudah tertutup. Profil Super Aggressive berjalan hanya di Strategy Tester.
-
-1. Ekstrak `Mercury_Vx_MT5.zip`. Di MT5 buka **File → Open Data Folder**, salin `Mercury_Vx.mq5` ke folder `MQL5/Experts/Advisors` jika versi lama ada di sana. Buka file lewat MetaEditor, lalu tekan **F7** untuk membuat file `.ex5`. [Kompilasi MQL5](https://www.mql5.com/en/docs/runtime)
-2. Tekan **Ctrl+R**. Pilih **Mercury_Vx**, simbol **XAUUSDm** atau **BTCUSDm**, dan timeframe **M3**. Pilih **Every tick based on real ticks** serta **Optimization → Disabled**. Untuk skenario serupa replay, setel deposit **US$1.000** dan leverage **1:100**. [Model tick MT5](https://www.metatrader5.com/en/terminal/help/algotrading/tick_generation)
-3. Di **Inputs** gunakan `SignalModel = SUPER_AGGRESSIVE`. Untuk simbol lain atau pengaturan manual gunakan `SUPER_AGGRESSIVE_CUSTOM`. Pilih M1 atau M3 dan atur risiko simulator. Untuk meniru tes tambahan emas 20%, gunakan `EXHAUSTION_REVERSAL`, M1, lookback 16, SL 2,00 ATR, dan TP 0,80 kali SL. Profil v1.40 tetap tersedia lewat `RESEARCH_BY_SYMBOL`.
-4. Di **Date → Custom period**, tentukan tanggal yang akan diuji. Untuk mereplikasi tes utama gunakan **1 Januari 2026–1 November 2026**. Untuk tes 1–20 tahun, pilih tanggal sesuai cakupan data tick simbol. Paket menyertakan konverter untuk arsip Bid/Ask. Detail impor ada di [panduan versi 1.40](https://github.com/edracode/HYPERION-OMEGA/blob/58dc6394d53be090340d8bce25d3d70744647dc6/Mercury-Vx/README.md#impor-riwayat). [Cakupan data di Tester](https://www.metatrader5.com/en/terminal/help/algotrading/test_preparation)
-5. Klik **Start**, lalu baca `Daily50Targets`, `DaysAt50Pct` dan `Daily outcomes` di **Journal**. `PASS` memerlukan laba bersih positif, semua hari bertick mencapai +50%, dan sampel bawaan minimal 100 trade serta 20 hari. Hari tanpa transaksi yang memiliki tick tetap dihitung. CSV harian dan tahunan diaktifkan secara bawaan. Lokasi berkas tercatat di Journal.
+1. Ekstrak ZIP. Buka **MT5 → File → Open Data Folder** dan salin `Mercury_Vx.mq5` ke `MQL5/Experts/Advisors` jika versi lama ada di sana. Buka file di MetaEditor lalu tekan **F7**. Uji lokal C++ memeriksa logika inti, termasuk exit dengan input nol dan ukuran lot USD/USC. Kompilasi native belum diverifikasi.
+2. Buka **Strategy Tester** dengan **Ctrl+R**. Pilih `Mercury_Vx` dan simbol Standard yang ingin diuji, misalnya `XAUUSDm` atau `BTCUSDm`. Pilih timeframe **M3**, **Every tick based on real ticks**, dan **Optimization → Disabled**. Pilih tanggal **1 November 2025–1 November 2026** untuk mereplikasi rentang tahunan, atau rentang sesuai riwayat simbol. [Model tick MT5](https://www.metatrader5.com/en/terminal/help/algotrading/tick_generation)
+3. Di **Inputs**, pilih `SignalModel = SUPER_AGGRESSIVE`. Pastikan `AggressiveMaxHoldSeconds = 0` dan `AggressiveCloseBeforeMidnightMinutes = 0`. Dengan pengaturan ini, Journal menampilkan `Hold=0` dan `AcceptedTimeExitRequests=0`. Gunakan input **180** dan **3** untuk tes pembanding berwaktu. Untuk kandidat BTC M5, gunakan `SUPER_AGGRESSIVE_CUSTOM` dan nilai pada tabel riset.
+4. Untuk tes Cent pilih simbol `XAUUSDc` atau `BTCUSDc` jika tersedia pada server atau melalui impor arsip. Bila mata uang simulasi **USC**, **100.000 USC = US$1.000**. Gunakan unit yang ditampilkan saat memasukkan deposit. Periksa `Coverage`, `Daily50Targets` dan `NetPct` di Journal. Salin CSV tahunan untuk mengecek setiap tahun lengkap. Panduan impor ada di [versi 1.40](https://github.com/edracode/HYPERION-OMEGA/blob/58dc6394d53be090340d8bce25d3d70744647dc6/Mercury-Vx/README.md#impor-riwayat).
