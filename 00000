@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                     Midas_Vx_Quantitative_SuperAggressive_v2.mq5 |
 //|                                  MIDAS VX Quantitative Research  |
-//|   MIDAS VX V3.5 - Classic High-Speed Engine + ATH Re-Leveraging  |
+//|    MIDAS VX V3.0 APEX RATCHET - Classic Core + ATH Profit Lock   |
 //+------------------------------------------------------------------+
 #property copyright "MIDAS VX Quantitative Research"
-#property version   "3.50"
-#property description "MIDAS VX V3.5 - Restored High-Speed Scalper + ATH Re-Leveraging x Recovery (>1.0)"
+#property version   "3.10"
+#property description "MIDAS VX V3.0 Core + ATH Profit-Lock Ratchet + Per-Strategy Regime Rotation"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -44,28 +44,26 @@ enum ENUM_MARKET_REGIME
 
 #define TICK_BUFFER_CAPACITY 64
 #define POS_REGISTRY_SIZE    128
-#define COMMENT_PREFIX       "MVX35"
-#define UI_PREFIX            "MVX35_UI_"
+#define COMMENT_PREFIX       "MVX3R"
+#define UI_PREFIX            "MVX3R_UI_"
 
 //+------------------------------------------------------------------+
 //| Input Parameters                                                 |
 //+------------------------------------------------------------------+
-input group "=== 1. CAPITAL GOVERNANCE & ATH RE-LEVERAGING (>1.0) ==="
+input group "=== 1. CAPITAL GOVERNANCE & ATH PROFIT-LOCK RATCHET ==="
 input ENUM_RISK_MODE InpRiskMode                  = RISK_MODE_SUPER_AGGRESSIVE; // Default Risk Profile Mode
 input double         InpCustomRiskPct             = 0.0;   // Risk % per Signal (0 = Use Mode Default)
 input double         InpMaxDailyLossPct           = 0.0;   // Max Daily Loss % (0 = Use Mode Default)
 input double         InpMaxCycleDDPct             = 0.0;   // Max Cycle Drawdown % Before Reset (0 = Mode Default)
-input int            InpDDCooldownMinutes         = 30;    // Pause Minutes After Cycle DD Breach (0 = Instant)
-input double         InpATHRecoveryTriggerPct     = 2.0;   // Trigger ATH Recovery When Equity Drops > X% Below ATH
-input double         InpReLeverageBase            = 1.15;  // Re-Leveraging Base Multiplier (>1.0) When Below ATH
-input double         InpReLeverageMax             = 1.50;  // Re-Leveraging Max Multiplier (>1.0) at Deep ATH Deficit
-input double         InpRecoveryBoostBase         = 1.15;  // Recovery Base Multiplier (>1.0) When Below ATH
-input double         InpRecoveryBoostMax          = 1.35;  // Recovery Max Multiplier (>1.0) at Deep ATH Deficit
-input double         InpMaxCombinedRecoveryMult   = 2.00;  // Safety Cap for (Re-Leveraging x Recovery)
+input bool           InpUseATHProfitLock          = true;  // Enable ATH Profit-Lock Ratchet (Protects Multi-Million Peaks)
+input double         InpATHLockMinGrowthMult      = 2.0;   // Activate ATH Lock Once Equity >= X * Initial Deposit
+input double         InpATHProfitLockTrailPct     = 18.0;  // Bank Profit & Reset Cycle if Equity Drops X% From ATH
+input int            InpProfitLockCooldownMin     = 180;   // Regime-Shift Pause Minutes After Banking ATH Profit
+input int            InpDDCooldownMinutes         = 45;    // Pause Minutes After Cycle DD Breach
 input double         InpMaxCumulativeRiskPct      = 8.0;   // Max Cumulative Open Exposure %
 input int            InpMaxOpenSignalsSymbol      = 3;     // Max Concurrent Signals on Symbol
-input int            InpMaxTranchesPerSignal      = 4;     // Split Orders When Lot > Broker Max Volume
-input bool           InpAllowMinLotFloor          = true;  // Allow 0.01 Min-Lot Floor on Small Accounts ($200-$1000)
+input int            InpMaxTranchesPerSignal      = 4;     // Auto-Split Orders When Lot > Broker Max Volume
+input bool           InpAllowMinLotFloor          = true;  // Keep 0.01 Min-Lot Floor on Small Accounts ($120-$1000)
 input bool           InpUseEquityCompounding      = true;  // Compound Lot Size on Equity Growth
 
 input group "=== 2. STRATEGY MODULE TOGGLES ==="
@@ -75,16 +73,16 @@ input bool           InpEnableStratC_MeanRev      = true;  // Enable S2: Quantit
 input bool           InpEnableStratD_VolExpl      = true;  // Enable S3: Volatility Explosion Breakout
 input bool           InpEnableStratE_TrendImp     = true;  // Enable S4: Trend Impulse Continuation
 
-input group "=== 3. MICROSTRUCTURE & COST MODEL (CLASSIC ENGINE) ==="
+input group "=== 3. MICROSTRUCTURE & COST-EFFICIENCY FILTER ==="
 input int            InpTickWindow                = 20;    // Microstructure Tick Window (<=64)
 input double         InpMinTickVelocity           = 0.25;  // Min Tick Velocity (ticks/sec)
 input double         InpMinExpectancyR            = 0.06;  // Min Cost-Adjusted Net Expectancy (R-multiples)
 input double         InpCommissionPerLot          = 0.0;   // Round-Turn Commission/Lot (0 = Auto from Real Fills)
 input double         InpBaseSlippagePips          = 0.25;  // Initial Slippage Buffer in Gold Pips ($0.025)
 input double         InpMaxSpreadPips             = 0.0;   // Hard Max Spread in Gold Pips (0 = Auto ATR-Scaled)
-input double         InpMaxSpreadATR_Ratio        = 0.35;  // Max Spread / M1 ATR Ratio
+input double         InpMaxSpreadATR_Ratio        = 0.18;  // Max Spread / M1 ATR Ratio (Blocks Low-ATR 2025 Chop)
 
-input group "=== 4. MULTI-TIMEFRAME INDICATORS (XAUUSD) ==="
+input group "=== 4. MULTI-TIMEFRAME INDICATORS (V3.0 CLASSIC) ==="
 input int            InpM1_FastEMA                = 8;     // M1 Fast EMA Period
 input int            InpM1_SlowEMA                = 21;    // M1 Slow EMA Period
 input int            InpM1_ATR_Period             = 14;    // M1 ATR Period
@@ -98,7 +96,7 @@ input int            InpH1_FastEMA                = 34;    // H1 Regime Fast EMA
 input int            InpH1_SlowEMA                = 100;   // H1 Regime Slow EMA
 input int            InpH1_ADX_Period             = 14;    // H1 Regime ADX Period
 
-input group "=== 5. CLASSIC HIGH-FREQUENCY EXIT PARAMETERS ==="
+input group "=== 5. V3.0 CLASSIC EXIT PARAMETERS ==="
 input double         InpSL_ATR_Multiplier         = 1.35;  // Base Stop Loss (x M1 ATR)
 input double         InpTP_ATR_Multiplier         = 2.15;  // Base Take Profit (x M1 ATR)
 input bool           InpUsePartialClose           = true;  // Enable Partial Profit Lock
@@ -111,19 +109,19 @@ input bool           InpUseMomentumExit           = true;  // Exit on Tick Imbal
 input int            InpMaxHoldSeconds            = 1200;  // Max Hold Duration (20 Min, 0 = Off)
 input int            InpReEntryCooldownSec        = 5;     // Min Cooldown Between Signals (Seconds)
 
-input group "=== 6. BAYESIAN SELF-OPTIMIZATION ==="
-input bool           InpUseAdaptiveSelfOpt        = true;  // Enable Rolling Strategy Adaptation
-input int            InpRollingWindowTrades       = 30;    // Rolling Window Size (Closed Trades/Strategy)
-input int            InpMinTradesForAdapt         = 10;    // Min Sample Size Before Adapting
-input double         InpSuspendExpectancyFloor    = -0.35; // Suspend Strategy if Rolling ExpR Below Floor
-input int            InpSuspendCooldownMinutes    = 20;    // Strategy Suspension Cooldown (Minutes)
+input group "=== 6. FAST PER-STRATEGY REGIME ROTATION ==="
+input bool           InpUseAdaptiveSelfOpt        = true;  // Enable Fast Per-Strategy Rotation
+input int            InpRollingWindowTrades       = 15;    // Fast Rolling Window (15 Trades/Strategy)
+input int            InpMinTradesForAdapt         = 8;     // Min Sample Size Before Rotating Strategy
+input double         InpSuspendExpectancyFloor    = -0.20; // Rotate Out Strategy if Rolling ExpR Below Floor
+input int            InpSuspendCooldownMinutes    = 25;    // Strategy Rotation Cooldown (Minutes)
 
 input group "=== 7. XAUUSD SESSION, BROKER & HUD ==="
 input bool           InpUseSessionFilter          = false; // Restrict Trading to Active Server Hours
 input int            InpSessionStartHour          = 2;     // Session Start Hour (Server Time)
 input int            InpSessionEndHour            = 22;    // Session End Hour (Server Time)
 input bool           InpAvoidGoldRollover         = true;  // Block COMEX Rollover Spread Spike (23:55-01:05)
-input ulong          InpMagicNumber               = 20260350; // EA Magic Number
+input ulong          InpMagicNumber               = 20260310; // EA Magic Number
 input ulong          InpSlippageDeviation         = 35;    // Max Order Deviation (Points)
 input bool           InpShowDashboardPanel        = true;  // Show Interactive Cyber-Slate Control Panel
 input int            InpPanelX                    = 14;    // Panel X Offset (Pixels)
@@ -271,9 +269,9 @@ struct SRuntimeConfig
       strat_enabled[STRAT_VOL_EXPLOSION]   = InpEnableStratD_VolExpl;
       strat_enabled[STRAT_TREND_IMPULSE]   = InpEnableStratE_TrendImp;
       trading_paused                       = false;
-      SetStatus("INITIALIZING MIDAS VX V3.5...", false);
+      SetStatus("INITIALIZING V3.0 APEX RATCHET...", false);
 
-      string gv_mode = StringFormat("MVX35_MODE_%I64u_%s", magic, symbol);
+      string gv_mode = StringFormat("MVX3R_MODE_%I64u_%s", magic, symbol);
       if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(gv_mode))
       {
          int saved = (int)GlobalVariableGet(gv_mode);
@@ -289,7 +287,7 @@ struct SRuntimeConfig
    void SaveModeState(ulong magic, const string symbol) const
    {
       if(MQLInfoInteger(MQL_TESTER)) return;
-      string gv_mode = StringFormat("MVX35_MODE_%I64u_%s", magic, symbol);
+      string gv_mode = StringFormat("MVX3R_MODE_%I64u_%s", magic, symbol);
       GlobalVariableSet(gv_mode, (double)risk_mode);
    }
 };
@@ -550,7 +548,7 @@ double NormalizePriceToTick(const string symbol, double price)
 }
 
 //+------------------------------------------------------------------+
-//| 1. Microstructure & Realized Cost Engine                         |
+//| 1. Microstructure & Realized Cost Engine (V3.0 Classic)          |
 //+------------------------------------------------------------------+
 class CMicrostructureEngine
 {
@@ -720,7 +718,7 @@ private:
 };
 
 //+------------------------------------------------------------------+
-//| 2. Multi-Timeframe Context Engine (Classic High-Frequency)       |
+//| 2. Multi-Timeframe Context Engine (V3.0 Classic)                 |
 //+------------------------------------------------------------------+
 class CMTFContextEngine
 {
@@ -1008,7 +1006,7 @@ private:
 };
 
 //+------------------------------------------------------------------+
-//| 3. Causal Bayesian Strategy Stats Tracker                        |
+//| 3. Fast Per-Strategy Regime Rotation Tracker                     |
 //+------------------------------------------------------------------+
 class CAdaptiveStatsTracker
 {
@@ -1130,10 +1128,11 @@ public:
       m_stats[sid].rolling_expectancy_r = sum_r / (double)samples;
       m_stats[sid].rolling_win_rate     = (double)sum_w / (double)samples;
 
+      // Rotate out only the specific strategy that mismatches the current regime
       if(InpUseAdaptiveSelfOpt && allow_suspend && samples >= g_cfg.min_trades_adapt)
       {
          if(m_stats[sid].rolling_expectancy_r < g_cfg.suspend_exp_floor ||
-            m_stats[sid].consecutive_losses >= 5)
+            m_stats[sid].consecutive_losses >= 4)
          {
             m_stats[sid].suspended     = true;
             m_stats[sid].suspend_until = exit_time + g_cfg.suspend_cooldown_min * 60;
@@ -1175,16 +1174,16 @@ public:
       return MathMax(0.38, MathMin(0.80, blended));
    }
 
+   // Active strategies always trade at full strength (1.00x - 1.20x), never crippled
    double GetAdaptiveMultiplier(ENUM_STRATEGY_ID sid) const
    {
       if(!InpUseAdaptiveSelfOpt || m_stats[sid].rolling_count < g_cfg.min_trades_adapt)
          return 1.00;
 
       double exp_r = m_stats[sid].rolling_expectancy_r;
-      if(exp_r > 0.30)  return 1.25;
-      if(exp_r > 0.12)  return 1.10;
-      if(exp_r >= 0.00) return 1.00;
-      return 0.85;
+      if(exp_r > 0.28)  return 1.20;
+      if(exp_r > 0.10)  return 1.08;
+      return 1.00;
    }
 
    bool   IsSuspended(ENUM_STRATEGY_ID sid) const   { return m_stats[sid].suspended; }
@@ -1194,19 +1193,21 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| 4. Capital Risk & ATH Re-Leveraging x Recovery (>1.0) Manager    |
+//| 4. Capital Governance & ATH Profit-Lock Ratchet Manager          |
 //+------------------------------------------------------------------+
 class CRiskAndCapitalManager
 {
 private:
    string   m_symbol;
    ulong    m_magic;
+   double   m_initial_deposit;
    double   m_daily_start_equity;
    double   m_ath_equity;
    double   m_dd_anchor_equity;
-   bool     m_in_ath_recovery;
    datetime m_cooldown_until;
+   string   m_cooldown_label;
    int      m_current_day_of_year;
+   int      m_ath_locks_count;
    string   m_gv_ath_key;
    string   m_gv_anchor_key;
    string   m_gv_daily_key;
@@ -1217,16 +1218,18 @@ public:
    {
       m_symbol          = symbol;
       m_magic           = magic;
-      m_in_ath_recovery = false;
       m_cooldown_until  = 0;
+      m_cooldown_label  = "";
+      m_ath_locks_count = 0;
 
       long login      = AccountInfoInteger(ACCOUNT_LOGIN);
-      m_gv_ath_key    = StringFormat("MVX35_ATH_%I64d", login);
-      m_gv_anchor_key = StringFormat("MVX35_ANC_%I64d", login);
-      m_gv_daily_key  = StringFormat("MVX35_DAYEQ_%I64d", login);
-      m_gv_day_key    = StringFormat("MVX35_DOY_%I64d", login);
+      m_gv_ath_key    = StringFormat("MVX3R_ATH_%I64d", login);
+      m_gv_anchor_key = StringFormat("MVX3R_ANC_%I64d", login);
+      m_gv_daily_key  = StringFormat("MVX3R_DAYEQ_%I64d", login);
+      m_gv_day_key    = StringFormat("MVX3R_DOY_%I64d", login);
 
-      double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+      double eq         = AccountInfoDouble(ACCOUNT_EQUITY);
+      m_initial_deposit = eq;
 
       MqlDateTime dt;
       TimeCurrent(dt);
@@ -1283,23 +1286,10 @@ public:
          }
       }
 
-      // Check ATH milestone: Once ATH is reclaimed or exceeded, reset back to Normal Rules (1.00x)
-      if(eq >= m_ath_equity)
+      if(eq > m_ath_equity)
       {
-         if(m_in_ath_recovery)
-         {
-            m_in_ath_recovery = false;
-            if(InpVerboseDiagnostics)
-               PrintFormat("[MIDAS VX ATH RECLAIMED] Equity $%.2f >= ATH $%.2f -> Resetting to Normal 1.00x Rules.", eq, m_ath_equity);
-         }
          m_ath_equity = eq;
          if(!MQLInfoInteger(MQL_TESTER)) GlobalVariableSet(m_gv_ath_key, m_ath_equity);
-      }
-      else
-      {
-         double dd_from_ath = ((m_ath_equity - eq) / m_ath_equity) * 100.0;
-         if(dd_from_ath >= InpATHRecoveryTriggerPct)
-            m_in_ath_recovery = true;
       }
 
       if(eq > m_dd_anchor_equity)
@@ -1310,15 +1300,8 @@ public:
    }
 
    double GetATHEquity() const      { return m_ath_equity; }
-   bool   IsInATHRecovery() const   { return m_in_ath_recovery; }
+   int    GetATHLocksCount() const  { return m_ath_locks_count; }
    double GetTodayPnLMoney() const  { return AccountInfoDouble(ACCOUNT_EQUITY) - m_daily_start_equity; }
-
-   double GetATHDeficitPct() const
-   {
-      double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-      if(m_ath_equity <= 0.0 || eq >= m_ath_equity) return 0.0;
-      return ((m_ath_equity - eq) / m_ath_equity) * 100.0;
-   }
 
    double GetTodayPnLPct() const
    {
@@ -1342,26 +1325,58 @@ public:
       return MathMax(0.0, dd);
    }
 
+   double GetATHPullbackPct() const
+   {
+      double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+      if(m_ath_equity <= 0.0 || eq >= m_ath_equity) return 0.0;
+      return ((m_ath_equity - eq) / m_ath_equity) * 100.0;
+   }
+
    bool CheckRiskCircuitBreaker(string &reason, bool &should_close_positions)
    {
       should_close_positions = false;
       datetime now = TimeCurrent();
+      double   eq  = AccountInfoDouble(ACCOUNT_EQUITY);
 
       if(m_cooldown_until > 0)
       {
          if(now < m_cooldown_until)
          {
             int mins_left = (int)((m_cooldown_until - now) / 60) + 1;
-            reason = StringFormat("COOLDOWN (%dm LEFT -> ATH RE-LEV)", mins_left);
+            reason = StringFormat("%s (%dm -> 1.00x RESUME)", m_cooldown_label, mins_left);
             return true;
          }
          else
          {
-            m_cooldown_until   = 0;
-            m_dd_anchor_equity = AccountInfoDouble(ACCOUNT_EQUITY);
-            if(m_dd_anchor_equity < m_ath_equity)
-               m_in_ath_recovery = true;
-            if(!MQLInfoInteger(MQL_TESTER)) GlobalVariableSet(m_gv_anchor_key, m_dd_anchor_equity);
+            m_cooldown_until     = 0;
+            m_cooldown_label     = "";
+            m_dd_anchor_equity   = eq;
+            m_ath_equity         = eq;
+            m_daily_start_equity = eq;
+            if(!MQLInfoInteger(MQL_TESTER))
+            {
+               GlobalVariableSet(m_gv_anchor_key, m_dd_anchor_equity);
+               GlobalVariableSet(m_gv_ath_key, m_ath_equity);
+               GlobalVariableSet(m_gv_daily_key, m_daily_start_equity);
+            }
+         }
+      }
+
+      // SOLUTION 1: ATH Profit-Lock Ratchet
+      // Once equity has multiplied past InpATHLockMinGrowthMult (e.g. 2x deposit -> multi-millions),
+      // if it pulls back InpATHProfitLockTrailPct (e.g. 18%) from ATH, bank the profit & reset at 1.00x!
+      if(InpUseATHProfitLock && m_ath_equity >= m_initial_deposit * MathMax(1.2, InpATHLockMinGrowthMult))
+      {
+         double ath_pullback = GetATHPullbackPct();
+         if(ath_pullback >= InpATHProfitLockTrailPct)
+         {
+            should_close_positions = true;
+            m_ath_locks_count++;
+            m_cooldown_until = now + MathMax(15, InpProfitLockCooldownMin) * 60;
+            m_cooldown_label = StringFormat("ATH PROFIT LOCKED #%d", m_ath_locks_count);
+            reason           = StringFormat("ATH LOCKED ($%.0f -> $%.0f, -%.1f%%) | PAUSE %dm",
+                                            m_ath_equity, eq, ath_pullback, InpProfitLockCooldownMin);
+            return true;
          }
       }
 
@@ -1377,54 +1392,19 @@ public:
       if(cycle_dd >= g_cfg.max_cycle_dd_pct)
       {
          should_close_positions = true;
-         if(InpDDCooldownMinutes > 0)
-         {
-            m_cooldown_until = now + InpDDCooldownMinutes * 60;
-            reason = StringFormat("CYCLE DD GUARD (%.2f%%) -> %dm PAUSE", cycle_dd, InpDDCooldownMinutes);
-         }
-         else
-         {
-            m_dd_anchor_equity = AccountInfoDouble(ACCOUNT_EQUITY);
-            m_in_ath_recovery  = true;
-            reason = "CYCLE DD RESET -> ATH RE-LEVERAGE";
-         }
+         m_cooldown_until       = now + MathMax(10, InpDDCooldownMinutes) * 60;
+         m_cooldown_label       = "CYCLE DD RESET";
+         reason = StringFormat("CYCLE DD GUARD (%.2f%%) -> %dm PAUSE", cycle_dd, InpDDCooldownMinutes);
          return true;
       }
 
       return false;
    }
 
-   // Core User Formula:
-   // - Normal Mode (at/above ATH): 1.00 x 1.00 = 1.00x (Baseline rules)
-   // - Loss from ATH Mode: Re-Leveraging (>1.0) x Recovery (>1.0) to recover funds back to ATH!
-   void GetReLeverageBreakdown(double &out_relev, double &out_recovery, double &out_combined) const
-   {
-      if(!m_in_ath_recovery)
-      {
-         out_relev    = 1.00;
-         out_recovery = 1.00;
-         out_combined = 1.00;
-         return;
-      }
-
-      double deficit_pct = GetATHDeficitPct();
-      double scale       = MathMin(1.0, deficit_pct / 25.0);
-
-      double relev_base = MathMax(1.01, InpReLeverageBase);
-      double relev_max  = MathMax(relev_base, InpReLeverageMax);
-      double rec_base   = MathMax(1.01, InpRecoveryBoostBase);
-      double rec_max    = MathMax(rec_base, InpRecoveryBoostMax);
-
-      out_relev    = relev_base + scale * (relev_max - relev_base);
-      out_recovery = rec_base   + scale * (rec_max   - rec_base);
-      out_combined = MathMin(MathMax(1.05, InpMaxCombinedRecoveryMult), out_relev * out_recovery);
-   }
-
+   // Always 1.00x Full Strength: Never becomes a "weak old man" and never uses dangerous Martingale
    double GetDrawdownRiskMultiplier() const
    {
-      double r1 = 1.0, r2 = 1.0, combined = 1.0;
-      GetReLeverageBreakdown(r1, r2, combined);
-      return combined;
+      return 1.00;
    }
 
    double CalculateCumulativeOpenRiskCurrency() const
@@ -1485,22 +1465,15 @@ public:
          return 0.0;
       }
 
-      double ath_mult = GetDrawdownRiskMultiplier(); // 1.00x Normal, or >1.00x (Re-Leveraging x Recovery) below ATH
-      double risk_pct = g_cfg.risk_pct * ath_mult * strategy_mult;
-
-      double base_ceiling = (g_cfg.risk_mode == RISK_MODE_AGGRESSIVE) ? 1.50 :
-                            ((g_cfg.risk_mode == RISK_MODE_SUPER_AGGRESSIVE) ? 2.50 : 4.00);
-      if(InpCustomRiskPct > 0.0) base_ceiling = InpCustomRiskPct;
-
-      // Expand risk ceiling proportionally during ATH Re-Leveraging so recovery boost is never clipped
-      double effective_ceiling = base_ceiling * ath_mult;
-      risk_pct = MathMin(risk_pct, effective_ceiling);
+      double risk_pct = g_cfg.risk_pct * GetDrawdownRiskMultiplier() * strategy_mult;
+      double ceiling  = (g_cfg.risk_mode == RISK_MODE_AGGRESSIVE) ? 1.50 :
+                        ((g_cfg.risk_mode == RISK_MODE_SUPER_AGGRESSIVE) ? 2.50 : 4.00);
+      if(InpCustomRiskPct > 0.0) ceiling = InpCustomRiskPct;
+      risk_pct = MathMin(risk_pct, ceiling);
 
       double target_risk_money = capital_base * (risk_pct / 100.0);
 
-      // Expand cumulative cap proportionally during ATH Recovery mode
-      double max_cum_pct      = g_cfg.max_cum_risk_pct * (m_in_ath_recovery ? MathMin(1.50, ath_mult) : 1.0);
-      double max_cum_money    = equity * (max_cum_pct / 100.0);
+      double max_cum_money    = equity * (g_cfg.max_cum_risk_pct / 100.0);
       double open_cum_money   = CalculateCumulativeOpenRiskCurrency();
       double remaining_budget = max_cum_money - open_cum_money;
       if(remaining_budget <= 0.0)
@@ -1540,11 +1513,11 @@ public:
       double norm_lots = MathFloor(raw_lots / lot_step) * lot_step;
       norm_lots = NormalizeDouble(norm_lots, 2);
 
-      // Micro-Equity Floor so $200-$1000 accounts never stall at 0.00 lots
+      // SOLUTION 3: Micro-Equity Floor so $120-$1000 accounts never stall at 0.00 lots in 2025
       if(norm_lots < min_lot)
       {
          double min_lot_risk = min_lot * loss_per_lot;
-         if(InpAllowMinLotFloor && equity >= 100.0 && min_lot_risk <= equity * 0.05)
+         if(InpAllowMinLotFloor && equity >= 120.0 && min_lot_risk <= equity * 0.045)
             norm_lots = min_lot;
          else
          {
@@ -1579,7 +1552,7 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| 5. Classic High-Frequency Signal & Expectancy Engine             |
+//| 5. V3.0 Classic Signal & Expectancy Engine                       |
 //+------------------------------------------------------------------+
 class CSignalScoringEngine
 {
@@ -1679,7 +1652,7 @@ public:
 
       SSignalCandidate cand;
 
-      // S0: ULTRA-FAST GOLD MOMENTUM SCALPING
+      // S0: ULTRA-FAST GOLD MOMENTUM SCALPING (V3.0 Classic)
       if(g_cfg.strat_enabled[STRAT_ULTRA_MOMENTUM] && stats.IsStrategyAvailable(STRAT_ULTRA_MOMENTUM, now))
       {
          cand.Reset();
@@ -1715,7 +1688,7 @@ public:
          if(cand.valid && cand.score > best.score) best = cand;
       }
 
-      // S1: LIQUIDITY SWEEP REVERSAL (M15 Swing Sweep)
+      // S1: LIQUIDITY SWEEP REVERSAL (V3.0 Classic)
       if(g_cfg.strat_enabled[STRAT_LIQUIDITY_SWEEP] && stats.IsStrategyAvailable(STRAT_LIQUIDITY_SWEEP, now))
       {
          cand.Reset();
@@ -1742,7 +1715,7 @@ public:
          if(cand.valid && cand.score > best.score) best = cand;
       }
 
-      // S2: QUANTITATIVE MEAN REVERSION
+      // S2: QUANTITATIVE MEAN REVERSION (V3.0 Classic)
       if(g_cfg.strat_enabled[STRAT_MEAN_REVERSION] && stats.IsStrategyAvailable(STRAT_MEAN_REVERSION, now))
       {
          cand.Reset();
@@ -1767,7 +1740,7 @@ public:
          if(cand.valid && cand.score > best.score) best = cand;
       }
 
-      // S3: VOLATILITY EXPLOSION BREAKOUT
+      // S3: VOLATILITY EXPLOSION BREAKOUT (V3.0 Classic)
       if(g_cfg.strat_enabled[STRAT_VOL_EXPLOSION] && stats.IsStrategyAvailable(STRAT_VOL_EXPLOSION, now))
       {
          cand.Reset();
@@ -1792,7 +1765,7 @@ public:
          if(cand.valid && cand.score > best.score) best = cand;
       }
 
-      // S4: TREND IMPULSE CONTINUATION
+      // S4: TREND IMPULSE CONTINUATION (V3.0 Classic)
       if(g_cfg.strat_enabled[STRAT_TREND_IMPULSE] && stats.IsStrategyAvailable(STRAT_TREND_IMPULSE, now))
       {
          cand.Reset();
@@ -1826,7 +1799,7 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| 6. Multi-Tranche Execution & Classic Scalping Position Manager   |
+//| 6. Multi-Tranche Execution & V3.0 Classic Position Manager       |
 //+------------------------------------------------------------------+
 class CExecutionEngine
 {
@@ -2072,7 +2045,7 @@ public:
          double unrealized_dist = (pos_type == POSITION_TYPE_BUY) ? (cur_px - open_px) : (open_px - cur_px);
          double true_rr         = unrealized_dist / initial_risk;
 
-         // 1. Classic Momentum Reversal Exit above +0.55R
+         // 1. V3.0 Classic Momentum Reversal Exit above +0.55R
          if(InpUseMomentumExit && true_rr >= 0.55)
          {
             bool rev_flip = (pos_type == POSITION_TYPE_BUY  && micro.tick_imbalance <= -0.58 && micro.price_velocity_pts < 0.0) ||
@@ -2084,7 +2057,7 @@ public:
             }
          }
 
-         // 2. Classic Partial Profit Lock at +1.05R (50%) + Breakeven SL
+         // 2. V3.0 Classic Partial Profit Lock at +1.05R (50%) + Breakeven SL
          if(InpUsePartialClose && true_rr >= g_cfg.partial_close_rr && !is_part_done)
          {
             double close_vol = MathFloor((vol * (g_cfg.partial_close_pct / 100.0)) / lot_step) * lot_step;
@@ -2104,7 +2077,7 @@ public:
             }
          }
 
-         // 3. Classic Dynamic ATR Trailing Stop at +0.85R
+         // 3. V3.0 Classic Dynamic ATR Trailing Stop at +0.85R
          if(InpUseTrailingStop && true_rr >= g_cfg.trail_act_rr)
          {
             double trail_dist = MathMax(min_dist, atr * g_cfg.trail_step_atr);
@@ -2272,7 +2245,7 @@ public:
       {
          CreateRect("BG_MIN", x, y, w, 34, C_BG_MAIN, C_CYAN);
          CreateRect("TOP_BAR", x, y, w, 3, C_CYAN, C_CYAN);
-         CreateLabel("HDR_TITLE", x + 10, y + 9, "MIDAS VX V3.5 // " + _Symbol, C_TEXT_PRI, 9, "Segoe UI Bold");
+         CreateLabel("HDR_TITLE", x + 10, y + 9, "MIDAS VX V3.0 RATCHET // " + _Symbol, C_TEXT_PRI, 9, "Segoe UI Bold");
          CreateLabel("HDR_BADGE", x + 235, y + 10, RiskModeName(g_cfg.risk_mode), C_AMBER, 8, "Consolas");
          CreateButton("BTN_MIN", x + w - 30, y + 6, 22, 22, "+", C_CYAN, C_BG_CARD, C_BORDER, 10);
          ChartRedraw(0);
@@ -2282,7 +2255,7 @@ public:
       int total_h = 548;
       CreateRect("BG_MAIN", x, y, w, total_h, C_BG_MAIN, C_BORDER);
       CreateRect("TOP_BAR", x, y, w, 3, C_CYAN, C_CYAN);
-      CreateLabel("HDR_TITLE", x + 12, y + 9, "MIDAS VX V3.5 // ATH RE-LEVERAGE", C_TEXT_PRI, 9, "Segoe UI Bold");
+      CreateLabel("HDR_TITLE", x + 12, y + 9, "MIDAS VX V3.0 // APEX RATCHET", C_TEXT_PRI, 9, "Segoe UI Bold");
       CreateLabel("HDR_SUB", x + 258, y + 10, _Symbol, C_CYAN, 8, "Consolas");
       CreateButton("BTN_MIN", x + w - 30, y + 6, 22, 22, "_", C_TEXT_PRI, C_BG_CARD, C_BORDER, 9);
 
@@ -2298,10 +2271,10 @@ public:
 
       int c2_y = c1_y + 74;
       CreateRect("CARD_RISK", x + 8, c2_y, w - 16, 134, C_BG_CARD, C_BORDER);
-      CreateLabel("LBL_RISK_HDR", x + 16, c2_y + 6, "ATH PEAK & RE-LEVERAGING x RECOVERY (>1.0)", C_TEXT_SEC, 7, "Segoe UI Bold");
+      CreateLabel("LBL_RISK_HDR", x + 16, c2_y + 6, "CAPITAL GOVERNANCE & ATH PROFIT-LOCK RATCHET", C_TEXT_SEC, 7, "Segoe UI Bold");
 
       CreateLabel("VAL_EQ_BAL", x + 16, c2_y + 22, "Equity: $0.00  |  Balance: $0.00", C_TEXT_PRI, 8, "Consolas");
-      CreateLabel("VAL_ATH_RELEV", x + 16, c2_y + 38, "ATH: $0.00 | NORMAL 1.00x (1.00x1.00)", C_EMERALD, 8, "Consolas");
+      CreateLabel("VAL_ATH_LOCK", x + 16, c2_y + 38, "ATH: $0.00 | Pullback: 0.0% / 18.0% (1.00x)", C_EMERALD, 8, "Consolas");
       CreateLabel("VAL_TODAY_PNL", x + 16, c2_y + 54, "Today P&L: $0.00 (0.00%)", C_EMERALD, 8, "Consolas");
 
       CreateLabel("LBL_DAILY_BAR", x + 16, c2_y + 72, "Daily Loss: 0.00% / 8.00%", C_TEXT_SEC, 7, "Consolas");
@@ -2414,17 +2387,10 @@ public:
       double ath = risk.GetATHEquity();
       SetText("VAL_EQ_BAL", StringFormat("Equity: $%.2f | Bal: $%.2f", eq, bal), C_TEXT_PRI);
 
-      double r_lev = 1.0, r_rec = 1.0, r_comb = 1.0;
-      risk.GetReLeverageBreakdown(r_lev, r_rec, r_comb);
-      if(risk.IsInATHRecovery())
-      {
-         SetText("VAL_ATH_RELEV", StringFormat("ATH:$%.0f(-%.1f%%) RE-LEV %.2fx%.2f=%.2fx",
-                 ath, risk.GetATHDeficitPct(), r_lev, r_rec, r_comb), C_AMBER);
-      }
-      else
-      {
-         SetText("VAL_ATH_RELEV", StringFormat("ATH:$%.0f | NORMAL 1.00x (1.00x1.00)", ath), C_EMERALD);
-      }
+      double pb = risk.GetATHPullbackPct();
+      color pb_clr = (pb > InpATHProfitLockTrailPct * 0.65) ? C_AMBER : C_EMERALD;
+      SetText("VAL_ATH_LOCK", StringFormat("ATH:$%.0f | PB:%.1f%%/%.0f%% | Locks:%d | 1.00x",
+              ath, pb, InpATHProfitLockTrailPct, risk.GetATHLocksCount()), pb_clr);
 
       double pnl_m = risk.GetTodayPnLMoney();
       double pnl_p = risk.GetTodayPnLPct();
@@ -2492,7 +2458,7 @@ public:
          if(!en)
             StyleButton("BTN_STRAT_" + idx_s, "OFF", C_TEXT_SEC, C_BTN_IDLE, C_BORDER);
          else if(susp)
-            StyleButton("BTN_STRAT_" + idx_s, "SUSP", C_BG_MAIN, C_AMBER, C_AMBER);
+            StyleButton("BTN_STRAT_" + idx_s, "ROT", C_BG_MAIN, C_AMBER, C_AMBER);
          else
             StyleButton("BTN_STRAT_" + idx_s, "ON", C_BG_MAIN, C_EMERALD, C_EMERALD);
 
@@ -2577,7 +2543,7 @@ public:
             {
                stats.ClearSuspension(sid);
                g_cfg.strat_enabled[i] = true;
-               g_cfg.SetStatus(StrategyShortCode(sid) + " SUSPENSION CLEARED", false);
+               g_cfg.SetStatus(StrategyShortCode(sid) + " ROTATION CLEARED", false);
             }
             else
             {
@@ -2718,9 +2684,8 @@ int OnInit()
    g_panel.Init(InpPanelX, InpPanelY);
    g_panel.Update(g_micro, g_mtf, g_risk, g_stats, g_exec);
 
-   PrintFormat("[MIDAS VX V3.5] Initialized on %s | Mode=%s | BaseRisk=%.2f%% | ATH ReLev=[%.2f..%.2f]xRec=[%.2f..%.2f]",
-               _Symbol, RiskModeName(g_cfg.risk_mode), g_cfg.risk_pct,
-               InpReLeverageBase, InpReLeverageMax, InpRecoveryBoostBase, InpRecoveryBoostMax);
+   PrintFormat("[MIDAS VX V3.0 APEX RATCHET] Initialized on %s | Mode=%s | Risk=%.2f%% | ATHLock=%.1f%%",
+               _Symbol, RiskModeName(g_cfg.risk_mode), g_cfg.risk_pct, InpATHProfitLockTrailPct);
 
    return INIT_SUCCEEDED;
 }
@@ -2924,7 +2889,7 @@ double OnTester()
    double pf         = TesterStatistics(STAT_PROFIT_FACTOR);
    double trades     = TesterStatistics(STAT_TRADES);
 
-   if(net_profit <= 0.0 || trades < 250.0 || max_dd_pct >= 40.0)
+   if(net_profit <= 0.0 || trades < 250.0 || max_dd_pct >= 35.0)
       return 0.0;
 
    double initial_dep = TesterStatistics(STAT_INITIAL_DEPOSIT);
