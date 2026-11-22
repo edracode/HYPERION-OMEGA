@@ -1,5 +1,5 @@
 #property strict
-#property version     "1.20"
+#property version     "1.30"
 #property description "Mercury Vx | MT5 tick and minute scalper"
 #include <Trade/Trade.mqh>
 
@@ -18,12 +18,19 @@ enum MercurySignal
    BTC_WICK_RECLAIM = 3
   };
 
+enum MercuryExitPolicy
+  {
+   PROFILE_TIMED = 0,
+   BRACKETS_ONLY = 1
+  };
+
 input group "Execution"
 input MercuryExecution ExecutionMode = TESTER_ONLY;
 input ulong MagicNumber = 60261122;
 input int MaxDeviationPoints = 20;
 input int DecisionIntervalSeconds = 2;
 input int CooldownSeconds = 20;
+input MercuryExitPolicy ExitPolicy = PROFILE_TIMED;
 input int MaxHoldSeconds = 180; // LEGACY_MICRO only. 0 disables the time exit.
 input int SessionStartHour = 0;
 input int SessionEndHour = 0;   // Same as start means all hours. Broker server time.
@@ -150,6 +157,7 @@ int csv = INVALID_HANDLE;
 int daysObserved = 0;
 int daysAtTarget = 0;
 double worstDayPct = 0.0;
+double bestDayPct = 0.0;
 bool hasDayReturn = false;
 datetime activeDay = 0;
 double dayStartEquity = 0.0;
@@ -377,6 +385,8 @@ void ConfigureSignal()
       entryStopMultiple = 1.80;
       entryMaxSpreadToRisk = 0.10;
      }
+   if(ExitPolicy == BRACKETS_ONLY)
+      positionMaxSeconds = 0;
   }
 
 int ChooseBarDirection(const MqlRates &bars[], const double atr)
@@ -455,6 +465,8 @@ void WriteDay(const double endingEquity)
       ++daysAtTarget;
    if(!hasDayReturn || result < worstDayPct)
       worstDayPct = result;
+   if(!hasDayReturn || result > bestDayPct)
+      bestDayPct = result;
    hasDayReturn = true;
    if(csv != INVALID_HANDLE)
       FileWrite(csv, TimeToString(activeDay, TIME_DATE), DoubleToString(dayStartEquity, 2),
@@ -943,6 +955,7 @@ int OnInit()
    daysObserved = 0;
    daysAtTarget = 0;
    worstDayPct = 0.0;
+   bestDayPct = 0.0;
    hasDayReturn = false;
    observedPosition = 0;
    checkedPosition = 0;
@@ -963,8 +976,9 @@ int OnInit()
    firstEntryDeal = 0;
    lastExitDeal = 0;
    observedTickCount = 0;
-   PrintFormat("Mercury Vx 1.20 | %s | Signal=%s | Hold=%d seconds | SL=%.2f ATR | Spread/SL<=%.2f",
-               _Symbol, EnumToString(signalInUse), positionMaxSeconds, entryStopMultiple, entryMaxSpreadToRisk);
+   PrintFormat("Mercury Vx 1.30 | %s | Signal=%s | ExitPolicy=%s | Hold=%d seconds | SL=%.2f ATR | Spread/SL<=%.2f",
+               _Symbol, EnumToString(signalInUse), EnumToString(ExitPolicy), positionMaxSeconds,
+               entryStopMultiple, entryMaxSpreadToRisk);
    return INIT_SUCCEEDED;
   }
 
@@ -1161,6 +1175,41 @@ void WriteAnnualReport()
    Print("Mercury Vx | annual CSV at ", TerminalInfoString(TERMINAL_COMMONDATA_PATH), "\\Files\\", name);
   }
 
+struct TargetAssessment
+  {
+   double winRate;
+   double averageWin;
+   double averageLoss;
+   double realizedRewardRisk;
+   bool hasRealizedRatio;
+   bool enoughSample;
+   bool winRateMet;
+   bool rewardRiskMet;
+   bool dailyTargetMet;
+   bool profitable;
+   bool pass;
+  };
+
+void AssessTargets(const double trades, const double wins, const double losses,
+                   const double grossProfit, const double grossLoss, const double net,
+                   const int observedDays, const int daysCheckedAtTarget,
+                   TargetAssessment &assessment)
+  {
+   assessment.winRate = trades > 0.0 ? 100.0 * wins / trades : 0.0;
+   assessment.averageWin = wins > 0.0 ? grossProfit / wins : 0.0;
+   assessment.averageLoss = losses > 0.0 ? grossLoss / losses : 0.0;
+   assessment.hasRealizedRatio = assessment.averageWin > 0.0 && assessment.averageLoss > 0.0;
+   assessment.realizedRewardRisk =
+      assessment.hasRealizedRatio ? assessment.averageWin / assessment.averageLoss : 0.0;
+   assessment.enoughSample = trades >= MinimumReportTrades && observedDays >= MinimumReportDays;
+   assessment.winRateMet = trades > 0.0 && 100.0 * wins >= WinRateTargetPct * trades;
+   assessment.rewardRiskMet = assessment.hasRealizedRatio && assessment.realizedRewardRisk >= RewardToRisk;
+   assessment.dailyTargetMet = observedDays > 0 && daysCheckedAtTarget == observedDays;
+   assessment.profitable = net > 0.0;
+   assessment.pass = assessment.enoughSample && assessment.winRateMet && assessment.rewardRiskMet &&
+                     assessment.dailyTargetMet && assessment.profitable;
+  }
+
 double OnTester()
   {
    const double endingEquity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -1174,39 +1223,37 @@ double OnTester()
    const double trades = TesterStatistics(STAT_TRADES);
    const double wins = TesterStatistics(STAT_PROFIT_TRADES);
    const double losses = TesterStatistics(STAT_LOSS_TRADES);
-   const double winRate = trades > 0.0 ? 100.0 * wins / trades : 0.0;
    const double netProfit = TesterStatistics(STAT_PROFIT);
    const double grossProfit = TesterStatistics(STAT_GROSS_PROFIT);
    const double grossLoss = MathAbs(TesterStatistics(STAT_GROSS_LOSS));
    const double startingDeposit = TesterStatistics(STAT_INITIAL_DEPOSIT);
    const double netPct = startingDeposit > 0.0 ? 100.0 * netProfit / startingDeposit : 0.0;
    const double drawdown = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);
-   const bool enoughSample = trades >= MinimumReportTrades && daysObserved >= MinimumReportDays;
-   const bool dailyTargetMet = daysObserved > 0 && daysAtTarget == daysObserved;
-   const bool winRateMet = winRate > WinRateTargetPct;
-   const bool profitable = netProfit > 0.0;
-   const bool pass = enoughSample && dailyTargetMet && winRateMet && profitable;
+   TargetAssessment assessment;
+   AssessTargets(trades, wins, losses, grossProfit, grossLoss, netProfit, daysObserved, daysAtTarget, assessment);
    PrintFormat("Mercury Vx | Trades=%.0f | WinRate=%.2f%% | Net=%.2f | EquityDD=%.2f%%",
-               trades, winRate, netProfit, drawdown);
-   if(wins > 0.0 && losses > 0.0 && grossLoss > 0.0)
+               trades, assessment.winRate, netProfit, drawdown);
+   if(assessment.hasRealizedRatio)
      {
-      const double averageWin = grossProfit / wins;
-      const double averageLoss = grossLoss / losses;
+      const double averageWin = assessment.averageWin;
+      const double averageLoss = assessment.averageLoss;
       PrintFormat("Mercury Vx | AvgWin=%.2f | AvgLoss=%.2f | RealizedRewardRisk=%.3f | BreakEvenWinsOrLosses=%.2f%% | ProfitFactor=%.3f",
-                  averageWin, averageLoss, averageWin / averageLoss,
+                  averageWin, averageLoss, assessment.realizedRewardRisk,
                   100.0 * averageLoss / (averageWin + averageLoss), grossProfit / grossLoss);
      }
+   const string realized = assessment.hasRealizedRatio ? DoubleToString(assessment.realizedRewardRisk, 3) : "n/a";
+   const string dailyBest = hasDayReturn ? DoubleToString(bestDayPct, 4) + "%" : "n/a";
+   const string dailyWorst = hasDayReturn ? DoubleToString(worstDayPct, 4) + "%" : "n/a";
+   const string result = assessment.pass ? "PASS" : "FAIL";
+   PrintFormat("Mercury Vx | Targets=%s | Sample=%s | WinRateAtLeast75=%s | RealizedRewardRisk=%s | RewardRiskAtLeast3=%s | NetProfitPositive=%s",
+               result, assessment.enoughSample ? "SUFFICIENT" : "INSUFFICIENT",
+               assessment.winRateMet ? "YES" : "NO", realized,
+               assessment.rewardRiskMet ? "YES" : "NO", assessment.profitable ? "YES" : "NO");
+   PrintFormat("Mercury Vx | Daily equity | DaysAt50Pct=%d/%d | AllDaysAt50Pct=%s | Best=%s | Worst=%s",
+               daysAtTarget, daysObserved, assessment.dailyTargetMet ? "YES" : "NO", dailyBest, dailyWorst);
    PrintFormat("Mercury Vx | Exit deals | SL=%d TP=%d Other=%d | AcceptedTimeExitRequests=%d | DrawdownHalt=%s",
                stopLossDeals, takeProfitDeals, otherExitDeals, acceptedTimeExits,
                blockedByDrawdown ? "YES" : "NO");
-   if(ExportDailyCsv)
-     {
-      const string worst = hasDayReturn ? DoubleToString(worstDayPct, 4) + "%" : "n/a";
-      PrintFormat("Mercury Vx | Days >= 50%%: %d/%d | Worst day=%s | Sample=%s | Targets=%s",
-                  daysAtTarget, daysObserved, worst,
-                  enoughSample ? "ENOUGH" : "BELOW CONFIGURED MINIMUM",
-                  pass ? "PASS" : "FAIL");
-     }
    PrintFormat("Mercury Vx | Entry checks | History=%d TickWindow=%d Signal=%d Spread=%d Contract=%d SizeOrMargin=%d Rejected=%d Accepted=%d",
                diagnostics.history, diagnostics.tickWindow, diagnostics.signal, diagnostics.spread,
                diagnostics.contract, diagnostics.sizeOrMargin, diagnostics.rejected, diagnostics.accepted);
@@ -1214,10 +1261,10 @@ double OnTester()
    if(csv != INVALID_HANDLE)
       FileFlush(csv);
 
-   const double score = 100.0 * Unit(netPct / 100.0) - drawdown + 0.10 * winRate;
-   if(!enoughSample)
+   const double score = 100.0 * Unit(netPct / 100.0) - drawdown + 0.10 * assessment.winRate;
+   if(!assessment.enoughSample)
+      return score - 30000.0;
+   if(!assessment.profitable)
       return score - 20000.0;
-   if(!profitable)
-      return score - 10000.0;
-   return pass ? 10000.0 + score : score;
+   return assessment.pass ? 10000.0 + score : score - 10000.0;
   }
