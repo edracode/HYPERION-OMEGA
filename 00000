@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                     Midas_Vx_Quantitative_SuperAggressive_v2.mq5 |
 //|                                  MIDAS VX Quantitative Research  |
-//|     MIDAS VX V4.0 - XAUUSD APEX UNLIMITED (Full-Strength Engine) |
+//|   MIDAS VX V3.5 - Classic High-Speed Engine + ATH Re-Leveraging  |
 //+------------------------------------------------------------------+
 #property copyright "MIDAS VX Quantitative Research"
-#property version   "4.00"
-#property description "MIDAS VX V4.0 - XAUUSD High-Payoff Quantitative Scalper + Multi-Tranche Engine"
+#property version   "3.50"
+#property description "MIDAS VX V3.5 - Restored High-Speed Scalper + ATH Re-Leveraging x Recovery (>1.0)"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -19,9 +19,9 @@
 //+------------------------------------------------------------------+
 enum ENUM_RISK_MODE
 {
-   RISK_MODE_AGGRESSIVE       = 0, // Mode 1: Aggressive (1.00% Risk, 5% Daily, 20% Cycle DD)
-   RISK_MODE_SUPER_AGGRESSIVE = 1, // Mode 2: Super Aggressive (1.85% Risk, 7% Daily, 24% Cycle DD)
-   RISK_MODE_EXTREME_RESEARCH = 2  // Mode 3: Extreme Research (2.95% Risk, 9% Daily, 28% Cycle DD)
+   RISK_MODE_AGGRESSIVE       = 0, // Mode 1: Aggressive (1.00% Risk, 6% Daily, 22% Cycle DD)
+   RISK_MODE_SUPER_AGGRESSIVE = 1, // Mode 2: Super Aggressive (1.85% Risk, 8% Daily, 26% Cycle DD)
+   RISK_MODE_EXTREME_RESEARCH = 2  // Mode 3: Extreme Research (2.95% Risk, 11% Daily, 32% Cycle DD)
 };
 
 enum ENUM_STRATEGY_ID
@@ -39,93 +39,96 @@ enum ENUM_MARKET_REGIME
    REGIME_TRENDING_HIGH_VOL    = 0,
    REGIME_TRENDING_NORMAL      = 1,
    REGIME_RANGING_MEAN_REV     = 2,
-   REGIME_COMPRESSION_BREAKOUT = 3,
-   REGIME_CHOPPY_LOW_EDGE      = 4
+   REGIME_COMPRESSION_BREAKOUT = 3
 };
 
 #define TICK_BUFFER_CAPACITY 64
 #define POS_REGISTRY_SIZE    128
-#define COMMENT_PREFIX       "MVX4"
-#define UI_PREFIX            "MVX4_UI_"
+#define COMMENT_PREFIX       "MVX35"
+#define UI_PREFIX            "MVX35_UI_"
 
 //+------------------------------------------------------------------+
 //| Input Parameters                                                 |
 //+------------------------------------------------------------------+
-input group "=== 1. XAUUSD CAPITAL & FULL-STRENGTH GOVERNANCE ==="
-input ENUM_RISK_MODE InpRiskMode                = RISK_MODE_SUPER_AGGRESSIVE; // Default Risk Profile Mode
-input double         InpCustomRiskPct           = 0.0;   // Risk % per Signal (0 = Use Mode Default)
-input double         InpMaxDailyLossPct         = 0.0;   // Max Daily Loss % (0 = Use Mode Default)
-input double         InpMaxCycleDDPct           = 0.0;   // Max Cycle Drawdown % Before Reset (0 = Mode Default)
-input int            InpDDCooldownMinutes       = 120;   // Pause Minutes After Cycle DD Reset (Resumes at 100% Power)
-input double         InpMaxCumulativeRiskPct    = 6.5;   // Max Cumulative Open Exposure %
-input int            InpMaxOpenSignalsSymbol    = 2;     // Max Concurrent Signals on Symbol
-input int            InpMaxTranchesPerSignal    = 4;     // Max Split Orders When Lot > Broker Max Volume
-input bool           InpAllowMinLotFloor        = true;  // Allow 0.01 Min-Lot Floor on Small Accounts ($200-$1000)
-input bool           InpUseEquityCompounding    = true;  // Compound Lot Size on Equity Growth
+input group "=== 1. CAPITAL GOVERNANCE & ATH RE-LEVERAGING (>1.0) ==="
+input ENUM_RISK_MODE InpRiskMode                  = RISK_MODE_SUPER_AGGRESSIVE; // Default Risk Profile Mode
+input double         InpCustomRiskPct             = 0.0;   // Risk % per Signal (0 = Use Mode Default)
+input double         InpMaxDailyLossPct           = 0.0;   // Max Daily Loss % (0 = Use Mode Default)
+input double         InpMaxCycleDDPct             = 0.0;   // Max Cycle Drawdown % Before Reset (0 = Mode Default)
+input int            InpDDCooldownMinutes         = 30;    // Pause Minutes After Cycle DD Breach (0 = Instant)
+input double         InpATHRecoveryTriggerPct     = 2.0;   // Trigger ATH Recovery When Equity Drops > X% Below ATH
+input double         InpReLeverageBase            = 1.15;  // Re-Leveraging Base Multiplier (>1.0) When Below ATH
+input double         InpReLeverageMax             = 1.50;  // Re-Leveraging Max Multiplier (>1.0) at Deep ATH Deficit
+input double         InpRecoveryBoostBase         = 1.15;  // Recovery Base Multiplier (>1.0) When Below ATH
+input double         InpRecoveryBoostMax          = 1.35;  // Recovery Max Multiplier (>1.0) at Deep ATH Deficit
+input double         InpMaxCombinedRecoveryMult   = 2.00;  // Safety Cap for (Re-Leveraging x Recovery)
+input double         InpMaxCumulativeRiskPct      = 8.0;   // Max Cumulative Open Exposure %
+input int            InpMaxOpenSignalsSymbol      = 3;     // Max Concurrent Signals on Symbol
+input int            InpMaxTranchesPerSignal      = 4;     // Split Orders When Lot > Broker Max Volume
+input bool           InpAllowMinLotFloor          = true;  // Allow 0.01 Min-Lot Floor on Small Accounts ($200-$1000)
+input bool           InpUseEquityCompounding      = true;  // Compound Lot Size on Equity Growth
 
 input group "=== 2. STRATEGY MODULE TOGGLES ==="
-input bool           InpEnableStratA_Momentum   = true;  // Enable S0: Ultra-Fast Gold Momentum
-input bool           InpEnableStratB_LiqSweep   = true;  // Enable S1: Gold Liquidity Sweep Reversal
-input bool           InpEnableStratC_MeanRev    = true;  // Enable S2: Quantitative Mean Reversion
-input bool           InpEnableStratD_VolExpl    = true;  // Enable S3: Volatility Explosion Breakout
-input bool           InpEnableStratE_TrendImp   = true;  // Enable S4: Trend Impulse Continuation
+input bool           InpEnableStratA_Momentum     = true;  // Enable S0: Ultra-Fast Gold Momentum
+input bool           InpEnableStratB_LiqSweep     = true;  // Enable S1: Gold Liquidity Sweep Reversal
+input bool           InpEnableStratC_MeanRev      = true;  // Enable S2: Quantitative Mean Reversion
+input bool           InpEnableStratD_VolExpl      = true;  // Enable S3: Volatility Explosion Breakout
+input bool           InpEnableStratE_TrendImp     = true;  // Enable S4: Trend Impulse Continuation
 
-input group "=== 3. XAUUSD MICROSTRUCTURE, CHOP SHIELD & COST MODEL ==="
-input int            InpTickWindow              = 24;    // Microstructure Tick Window (<=64)
-input double         InpMinTickVelocity         = 0.45;  // Min Tick Velocity (ticks/sec)
-input double         InpMinExpectancyR          = 0.14;  // Min Cost-Adjusted Net Expectancy (R-multiples)
-input double         InpMinM5_ADX_Trend         = 19.0;  // Min M5 ADX to Filter Dead Sideways Chop
-input double         InpMinATR_ExpansionRatio   = 0.82;  // Min M1 ATR / Baseline Ratio (Blocks Dead Markets)
-input double         InpCommissionPerLot        = 0.0;   // Round-Turn Commission/Lot (0 = Auto from Real Fills)
-input double         InpBaseSlippagePips        = 0.30;  // Initial Slippage Buffer in Gold Pips ($0.03)
-input double         InpMaxSpreadPips           = 0.0;   // Hard Max Spread in Gold Pips (0 = Auto ATR-Scaled)
-input double         InpMaxSpreadATR_Ratio      = 0.30;  // Max Spread / M1 ATR Ratio
+input group "=== 3. MICROSTRUCTURE & COST MODEL (CLASSIC ENGINE) ==="
+input int            InpTickWindow                = 20;    // Microstructure Tick Window (<=64)
+input double         InpMinTickVelocity           = 0.25;  // Min Tick Velocity (ticks/sec)
+input double         InpMinExpectancyR            = 0.06;  // Min Cost-Adjusted Net Expectancy (R-multiples)
+input double         InpCommissionPerLot          = 0.0;   // Round-Turn Commission/Lot (0 = Auto from Real Fills)
+input double         InpBaseSlippagePips          = 0.25;  // Initial Slippage Buffer in Gold Pips ($0.025)
+input double         InpMaxSpreadPips             = 0.0;   // Hard Max Spread in Gold Pips (0 = Auto ATR-Scaled)
+input double         InpMaxSpreadATR_Ratio        = 0.35;  // Max Spread / M1 ATR Ratio
 
 input group "=== 4. MULTI-TIMEFRAME INDICATORS (XAUUSD) ==="
-input int            InpM1_FastEMA              = 8;     // M1 Fast EMA Period
-input int            InpM1_SlowEMA              = 21;    // M1 Slow EMA Period
-input int            InpM1_ATR_Period           = 14;    // M1 ATR Period
-input int            InpM1_RSI_Period           = 7;     // M1 Fast RSI Period
-input int            InpM1_BB_Period            = 20;    // M1 Bollinger Bands Period
-input double         InpM1_BB_Deviation         = 2.0;   // M1 Bollinger Bands StdDev
-input int            InpM5_ATR_Period           = 14;    // M5 ATR Period
-input int            InpM5_ADX_Period           = 14;    // M5 ADX Period
-input int            InpM15_SwingLookback       = 18;    // M15 Liquidity Pool Lookback Bars
-input int            InpH1_FastEMA              = 34;    // H1 Regime Fast EMA
-input int            InpH1_SlowEMA              = 100;   // H1 Regime Slow EMA
-input int            InpH1_ADX_Period           = 14;    // H1 Regime ADX Period
+input int            InpM1_FastEMA                = 8;     // M1 Fast EMA Period
+input int            InpM1_SlowEMA                = 21;    // M1 Slow EMA Period
+input int            InpM1_ATR_Period             = 14;    // M1 ATR Period
+input int            InpM1_RSI_Period             = 7;     // M1 Fast RSI Period
+input int            InpM1_BB_Period              = 20;    // M1 Bollinger Bands Period
+input double         InpM1_BB_Deviation           = 2.0;   // M1 Bollinger Bands StdDev
+input int            InpM5_ATR_Period             = 14;    // M5 ATR Period
+input int            InpM5_ADX_Period             = 14;    // M5 ADX Period
+input int            InpM15_SwingLookback         = 16;    // M15 Liquidity Pool Lookback Bars
+input int            InpH1_FastEMA                = 34;    // H1 Regime Fast EMA
+input int            InpH1_SlowEMA                = 100;   // H1 Regime Slow EMA
+input int            InpH1_ADX_Period             = 14;    // H1 Regime ADX Period
 
-input group "=== 5. HIGH-PAYOFF EXITS (LET WINNERS RUN) ==="
-input double         InpSL_ATR_Multiplier       = 1.55;  // Base Stop Loss (x M1 ATR)
-input double         InpTP_ATR_Multiplier       = 3.10;  // Base Take Profit (x M1 ATR -> 2.0R Target)
-input bool           InpUsePartialClose         = true;  // Enable Late Partial Profit Lock
-input double         InpPartialCloseRR          = 1.55;  // Trigger Partial Close at +1.55R (Protects Avg Win)
-input double         InpPartialClosePct         = 30.0;  // Close Only 30% (Leaves 70% Runner to Full TP)
-input bool           InpUseTrailingStop         = true;  // Enable Breathing ATR Trailing Stop
-input double         InpTrailActivationRR       = 1.35;  // Activate Trailing Stop at +1.35R
-input double         InpTrailStepATR            = 0.75;  // Trailing Distance (x M1 ATR)
-input bool           InpUseMomentumExit         = true;  // Exit Early Only Above +1.20R on Extreme Reversal
-input int            InpMaxHoldSeconds          = 2400;  // Max Hold Duration (40 Min, 0 = Off)
-input int            InpReEntryCooldownSec      = 20;    // Min Cooldown Between Signals (Seconds)
+input group "=== 5. CLASSIC HIGH-FREQUENCY EXIT PARAMETERS ==="
+input double         InpSL_ATR_Multiplier         = 1.35;  // Base Stop Loss (x M1 ATR)
+input double         InpTP_ATR_Multiplier         = 2.15;  // Base Take Profit (x M1 ATR)
+input bool           InpUsePartialClose           = true;  // Enable Partial Profit Lock
+input double         InpPartialCloseRR            = 1.05;  // Trigger Partial Close at +1.05R
+input double         InpPartialClosePct           = 50.0;  // Close 50% at Partial Target & Move SL to BE
+input bool           InpUseTrailingStop           = true;  // Enable Dynamic ATR Trailing Stop
+input double         InpTrailActivationRR         = 0.85;  // Activate Trailing Stop at +0.85R
+input double         InpTrailStepATR              = 0.50;  // Trailing Distance (x M1 ATR)
+input bool           InpUseMomentumExit           = true;  // Exit on Tick Imbalance Reversal Above +0.55R
+input int            InpMaxHoldSeconds            = 1200;  // Max Hold Duration (20 Min, 0 = Off)
+input int            InpReEntryCooldownSec        = 5;     // Min Cooldown Between Signals (Seconds)
 
-input group "=== 6. CAUSAL BAYESIAN SELF-OPTIMIZATION ==="
-input bool           InpUseAdaptiveSelfOpt      = true;  // Enable Rolling Strategy Adaptation
-input int            InpRollingWindowTrades     = 30;    // Rolling Window Size (Closed Trades/Strategy)
-input int            InpMinTradesForAdapt       = 10;    // Min Sample Size Before Adapting
-input double         InpSuspendExpectancyFloor  = -0.25; // Suspend Strategy if Rolling ExpR Below Floor
-input int            InpSuspendCooldownMinutes  = 30;    // Strategy Suspension Cooldown (Minutes)
+input group "=== 6. BAYESIAN SELF-OPTIMIZATION ==="
+input bool           InpUseAdaptiveSelfOpt        = true;  // Enable Rolling Strategy Adaptation
+input int            InpRollingWindowTrades       = 30;    // Rolling Window Size (Closed Trades/Strategy)
+input int            InpMinTradesForAdapt         = 10;    // Min Sample Size Before Adapting
+input double         InpSuspendExpectancyFloor    = -0.35; // Suspend Strategy if Rolling ExpR Below Floor
+input int            InpSuspendCooldownMinutes    = 20;    // Strategy Suspension Cooldown (Minutes)
 
 input group "=== 7. XAUUSD SESSION, BROKER & HUD ==="
-input bool           InpUseSessionFilter        = false; // Restrict Trading to Active Server Hours
-input int            InpSessionStartHour        = 2;     // Session Start Hour (Server Time)
-input int            InpSessionEndHour          = 22;    // Session End Hour (Server Time)
-input bool           InpAvoidGoldRollover       = true;  // Block COMEX Rollover Spread Spike (23:55-01:05)
-input ulong          InpMagicNumber             = 20260401; // EA Magic Number
-input ulong          InpSlippageDeviation       = 35;    // Max Order Deviation (Points)
-input bool           InpShowDashboardPanel      = true;  // Show Interactive Cyber-Slate Control Panel
-input int            InpPanelX                  = 14;    // Panel X Offset (Pixels)
-input int            InpPanelY                  = 24;    // Panel Y Offset (Pixels)
-input bool           InpVerboseDiagnostics      = false; // Print Detailed Execution Logs
+input bool           InpUseSessionFilter          = false; // Restrict Trading to Active Server Hours
+input int            InpSessionStartHour          = 2;     // Session Start Hour (Server Time)
+input int            InpSessionEndHour            = 22;    // Session End Hour (Server Time)
+input bool           InpAvoidGoldRollover         = true;  // Block COMEX Rollover Spread Spike (23:55-01:05)
+input ulong          InpMagicNumber               = 20260350; // EA Magic Number
+input ulong          InpSlippageDeviation         = 35;    // Max Order Deviation (Points)
+input bool           InpShowDashboardPanel        = true;  // Show Interactive Cyber-Slate Control Panel
+input int            InpPanelX                    = 14;    // Panel X Offset (Pixels)
+input int            InpPanelY                    = 24;    // Panel Y Offset (Pixels)
+input bool           InpVerboseDiagnostics        = false; // Print Detailed Execution Logs
 
 //+------------------------------------------------------------------+
 //| Gold Pip Normalization Helper (2-Digit vs 3-Digit Brokers)       |
@@ -216,43 +219,43 @@ struct SRuntimeConfig
       if(mode == RISK_MODE_AGGRESSIVE)
       {
          risk_pct           = 1.00;
-         max_daily_loss_pct = 5.0;
-         max_cycle_dd_pct   = 20.0;
+         max_daily_loss_pct = 6.0;
+         max_cycle_dd_pct   = 22.0;
          if(from_ui_click)
          {
-            max_cum_risk_pct   = 4.0;
+            max_cum_risk_pct   = 5.0;
             max_signals_symbol = 2;
-            min_expectancy_r   = 0.16;
+            min_expectancy_r   = 0.08;
          }
       }
       else if(mode == RISK_MODE_SUPER_AGGRESSIVE)
       {
          risk_pct           = 1.85;
-         max_daily_loss_pct = 7.0;
-         max_cycle_dd_pct   = 24.0;
+         max_daily_loss_pct = 8.0;
+         max_cycle_dd_pct   = 26.0;
          if(from_ui_click)
          {
-            max_cum_risk_pct   = 6.5;
-            max_signals_symbol = 2;
-            min_expectancy_r   = 0.14;
+            max_cum_risk_pct   = 8.0;
+            max_signals_symbol = 3;
+            min_expectancy_r   = 0.06;
          }
       }
       else // RISK_MODE_EXTREME_RESEARCH
       {
          risk_pct           = 2.95;
-         max_daily_loss_pct = 9.0;
-         max_cycle_dd_pct   = 28.0;
+         max_daily_loss_pct = 11.0;
+         max_cycle_dd_pct   = 32.0;
          if(from_ui_click)
          {
-            max_cum_risk_pct   = 9.0;
-            max_signals_symbol = 3;
-            min_expectancy_r   = 0.11;
+            max_cum_risk_pct   = 11.0;
+            max_signals_symbol = 4;
+            min_expectancy_r   = 0.04;
          }
       }
 
       if(!from_ui_click)
       {
-         if(InpCustomRiskPct > 0.0)   risk_pct           = MathMin(InpCustomRiskPct, 5.0);
+         if(InpCustomRiskPct > 0.0)   risk_pct           = MathMin(InpCustomRiskPct, 6.0);
          if(InpMaxDailyLossPct > 0.0) max_daily_loss_pct = InpMaxDailyLossPct;
          if(InpMaxCycleDDPct > 0.0)   max_cycle_dd_pct   = InpMaxCycleDDPct;
       }
@@ -268,9 +271,9 @@ struct SRuntimeConfig
       strat_enabled[STRAT_VOL_EXPLOSION]   = InpEnableStratD_VolExpl;
       strat_enabled[STRAT_TREND_IMPULSE]   = InpEnableStratE_TrendImp;
       trading_paused                       = false;
-      SetStatus("INITIALIZING XAUUSD V4.0...", false);
+      SetStatus("INITIALIZING MIDAS VX V3.5...", false);
 
-      string gv_mode = StringFormat("MVX4_MODE_%I64u_%s", magic, symbol);
+      string gv_mode = StringFormat("MVX35_MODE_%I64u_%s", magic, symbol);
       if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(gv_mode))
       {
          int saved = (int)GlobalVariableGet(gv_mode);
@@ -286,7 +289,7 @@ struct SRuntimeConfig
    void SaveModeState(ulong magic, const string symbol) const
    {
       if(MQLInfoInteger(MQL_TESTER)) return;
-      string gv_mode = StringFormat("MVX4_MODE_%I64u_%s", magic, symbol);
+      string gv_mode = StringFormat("MVX35_MODE_%I64u_%s", magic, symbol);
       GlobalVariableSet(gv_mode, (double)risk_mode);
    }
 };
@@ -447,8 +450,6 @@ struct SStrategyStats
    int      rolling_count;
    double   rolling_expectancy_r;
    double   rolling_win_rate;
-   double   rolling_avg_win_r;
-   double   rolling_avg_loss_r;
    int      consecutive_losses;
    datetime last_exit_time;
    bool     suspended;
@@ -465,10 +466,8 @@ struct SStrategyStats
       gross_loss           = 0.0;
       net_profit           = 0.0;
       rolling_count        = 0;
-      rolling_expectancy_r = 0.22;
-      rolling_win_rate     = 0.54;
-      rolling_avg_win_r    = 1.45;
-      rolling_avg_loss_r   = 1.00;
+      rolling_expectancy_r = 0.25;
+      rolling_win_rate     = 0.62;
       consecutive_losses   = 0;
       last_exit_time       = 0;
       suspended            = false;
@@ -522,11 +521,10 @@ string RegimeName(ENUM_MARKET_REGIME reg)
 {
    switch(reg)
    {
-      case REGIME_TRENDING_HIGH_VOL:    return "GOLD TREND HI-VOL";
-      case REGIME_TRENDING_NORMAL:      return "GOLD TREND NORMAL";
-      case REGIME_RANGING_MEAN_REV:     return "GOLD MEAN-REVERT";
-      case REGIME_COMPRESSION_BREAKOUT: return "GOLD BREAKOUT";
-      case REGIME_CHOPPY_LOW_EDGE:      return "CHOPPY (SHIELDED)";
+      case REGIME_TRENDING_HIGH_VOL:    return "TREND HI-VOL";
+      case REGIME_TRENDING_NORMAL:      return "TREND NORMAL";
+      case REGIME_RANGING_MEAN_REV:     return "RANGING MEAN-REV";
+      case REGIME_COMPRESSION_BREAKOUT: return "VOL COMPRESSION";
       default:                          return "INITIALIZING";
    }
 }
@@ -552,7 +550,7 @@ double NormalizePriceToTick(const string symbol, double price)
 }
 
 //+------------------------------------------------------------------+
-//| 1. XAUUSD Microstructure & Realized Cost Engine                  |
+//| 1. Microstructure & Realized Cost Engine                         |
 //+------------------------------------------------------------------+
 class CMicrostructureEngine
 {
@@ -674,12 +672,12 @@ public:
       ComputeMetrics(point);
    }
 
-   bool IsReady() const { return (m_count >= 6); }
+   bool IsReady() const { return (m_count >= 5); }
 
 private:
    void ComputeMetrics(double point)
    {
-      int win = MathMin(m_count, MathMax(6, MathMin(g_cfg.tick_window, TICK_BUFFER_CAPACITY)));
+      int win = MathMin(m_count, MathMax(5, MathMin(g_cfg.tick_window, TICK_BUFFER_CAPACITY)));
       if(win < 4) return;
 
       int newest_idx = (m_head - 1 + TICK_BUFFER_CAPACITY) % TICK_BUFFER_CAPACITY;
@@ -722,7 +720,7 @@ private:
 };
 
 //+------------------------------------------------------------------+
-//| 2. Multi-Timeframe Context & Chop-Shield Regime Engine           |
+//| 2. Multi-Timeframe Context Engine (Classic High-Frequency)       |
 //+------------------------------------------------------------------+
 class CMTFContextEngine
 {
@@ -761,12 +759,9 @@ public:
    double m1_low[4];
    double m1_close[4];
    double m1_autocorr_lag1;
-   double m1_atr_baseline;
 
    double m5_atr[2];
    double m5_adx[2];
-   double m5_plus_di[2];
-   double m5_minus_di[2];
    double m5_atr_avg;
 
    double m15_swing_high;
@@ -776,8 +771,6 @@ public:
    double h1_ema_fast[2];
    double h1_ema_slow[2];
    double h1_adx[2];
-   double h1_plus_di[2];
-   double h1_minus_di[2];
    int    h1_trend_dir;
 
    ENUM_MARKET_REGIME current_regime;
@@ -818,7 +811,6 @@ public:
       }
 
       ArrayInitialize(m1_atr, 0.0);
-      m1_atr_baseline   = 0.0;
       current_regime    = REGIME_TRENDING_NORMAL;
       seasonality_score = 1.0;
       m1_autocorr_lag1  = 0.0;
@@ -893,15 +885,9 @@ private:
       if(CopyBuffer(m_h_adx_h1, 0, 1, 2, buf) < 2) return false;
       h1_adx[0] = buf[1]; h1_adx[1] = buf[0];
 
-      if(CopyBuffer(m_h_adx_h1, 1, 1, 2, buf) < 2) return false;
-      h1_plus_di[0] = buf[1]; h1_plus_di[1] = buf[0];
-
-      if(CopyBuffer(m_h_adx_h1, 2, 1, 2, buf) < 2) return false;
-      h1_minus_di[0] = buf[1]; h1_minus_di[1] = buf[0];
-
-      if(h1_ema_fast[0] > h1_ema_slow[0] && h1_plus_di[0] >= h1_minus_di[0])
+      if(h1_ema_fast[0] > h1_ema_slow[0])
          h1_trend_dir = 1;
-      else if(h1_ema_fast[0] < h1_ema_slow[0] && h1_minus_di[0] >= h1_plus_di[0])
+      else if(h1_ema_fast[0] < h1_ema_slow[0])
          h1_trend_dir = -1;
       else
          h1_trend_dir = 0;
@@ -909,11 +895,11 @@ private:
       MqlDateTime dt;
       TimeCurrent(dt);
       if((dt.hour >= 8 && dt.hour <= 11) || (dt.hour >= 13 && dt.hour <= 18))
-         seasonality_score = 1.20;
+         seasonality_score = 1.18;
       else if(dt.hour >= 19 && dt.hour <= 21)
-         seasonality_score = 1.00;
+         seasonality_score = 1.02;
       else
-         seasonality_score = 0.88;
+         seasonality_score = 0.92;
 
       return true;
    }
@@ -949,12 +935,6 @@ private:
       if(CopyBuffer(m_h_adx_m5, 0, 1, 2, buf) < 2) return false;
       m5_adx[0] = buf[1]; m5_adx[1] = buf[0];
 
-      if(CopyBuffer(m_h_adx_m5, 1, 1, 2, buf) < 2) return false;
-      m5_plus_di[0] = buf[1]; m5_plus_di[1] = buf[0];
-
-      if(CopyBuffer(m_h_adx_m5, 2, 1, 2, buf) < 2) return false;
-      m5_minus_di[0] = buf[1]; m5_minus_di[1] = buf[0];
-
       return true;
    }
 
@@ -967,6 +947,9 @@ private:
       if(CopyBuffer(m_h_ema_slow_m1, 0, 1, 3, buf3) < 3) return false;
       m1_ema_slow[0] = buf3[2]; m1_ema_slow[1] = buf3[1]; m1_ema_slow[2] = buf3[0];
 
+      if(CopyBuffer(m_h_atr_m1, 0, 1, 3, buf3) < 3) return false;
+      m1_atr[0] = buf3[2]; m1_atr[1] = buf3[1]; m1_atr[2] = buf3[0];
+
       if(CopyBuffer(m_h_rsi_m1, 0, 1, 3, buf3) < 3) return false;
       m1_rsi[0] = buf3[2]; m1_rsi[1] = buf3[1]; m1_rsi[2] = buf3[0];
 
@@ -978,16 +961,6 @@ private:
 
       if(CopyBuffer(m_h_bb_m1, 2, 1, 3, buf3) < 3) return false;
       m1_bb_lower[0] = buf3[2]; m1_bb_lower[1] = buf3[1]; m1_bb_lower[2] = buf3[0];
-
-      double atr30[30];
-      if(CopyBuffer(m_h_atr_m1, 0, 1, 30, atr30) < 30) return false;
-      m1_atr[0] = atr30[29];
-      m1_atr[1] = atr30[28];
-      m1_atr[2] = atr30[27];
-
-      double atr_sum = 0.0;
-      for(int i = 0; i < 30; i++) atr_sum += atr30[i];
-      m1_atr_baseline = atr_sum / 30.0;
 
       MqlRates rates[32];
       if(CopyRates(m_symbol, PERIOD_M1, 1, 32, rates) < 32) return false;
@@ -1024,12 +997,8 @@ private:
 
    void ClassifyRegime()
    {
-      double vol_ratio    = (m5_atr_avg > 0.0) ? (m5_atr[0] / m5_atr_avg) : 1.0;
-      double m1_atr_ratio = (m1_atr_baseline > 0.0) ? (m1_atr[0] / m1_atr_baseline) : 1.0;
-
-      if(m5_adx[0] < InpMinM5_ADX_Trend && m1_atr_ratio < InpMinATR_ExpansionRatio)
-         current_regime = REGIME_CHOPPY_LOW_EDGE;
-      else if(vol_ratio < 0.80 && m5_adx[0] < 22.0)
+      double vol_ratio = (m5_atr_avg > 0.0) ? (m5_atr[0] / m5_atr_avg) : 1.0;
+      if(vol_ratio < 0.78 && m5_adx[0] < 20.0)
          current_regime = REGIME_COMPRESSION_BREAKOUT;
       else if(h1_adx[0] >= 22.0 && h1_trend_dir != 0)
          current_regime = (vol_ratio >= 1.15) ? REGIME_TRENDING_HIGH_VOL : REGIME_TRENDING_NORMAL;
@@ -1039,7 +1008,7 @@ private:
 };
 
 //+------------------------------------------------------------------+
-//| 3. Causal Empirical Payoff & Bayesian Stats Tracker              |
+//| 3. Causal Bayesian Strategy Stats Tracker                        |
 //+------------------------------------------------------------------+
 class CAdaptiveStatsTracker
 {
@@ -1116,7 +1085,7 @@ public:
                        + HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION);
 
          datetime dtime = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
-         double est_r   = (profit >= 0.0) ? 1.35 : -1.0;
+         double est_r   = (profit >= 0.0) ? 1.15 : -1.0;
          RecordTradeResult(sid, profit, est_r, dtime, false);
       }
    }
@@ -1150,33 +1119,16 @@ public:
       m_stats[sid].win_history[idx] = is_win;
       m_stats[sid].rolling_count++;
 
-      int    samples     = MathMin(m_stats[sid].rolling_count, win_len);
-      double sum_r       = 0.0;
-      int    sum_w       = 0;
-      double sum_win_r   = 0.0;
-      double sum_loss_r  = 0.0;
-      int    loss_cnt    = 0;
-
+      int    samples = MathMin(m_stats[sid].rolling_count, win_len);
+      double sum_r   = 0.0;
+      int    sum_w   = 0;
       for(int k = 0; k < samples; k++)
       {
-         double rv = m_stats[sid].r_history[k];
-         sum_r += rv;
-         if(m_stats[sid].win_history[k] == 1)
-         {
-            sum_w++;
-            sum_win_r += MathMax(0.1, rv);
-         }
-         else
-         {
-            loss_cnt++;
-            sum_loss_r += MathMax(0.1, MathAbs(rv));
-         }
+         sum_r += m_stats[sid].r_history[k];
+         sum_w += m_stats[sid].win_history[k];
       }
-
       m_stats[sid].rolling_expectancy_r = sum_r / (double)samples;
       m_stats[sid].rolling_win_rate     = (double)sum_w / (double)samples;
-      if(sum_w > 0)    m_stats[sid].rolling_avg_win_r  = sum_win_r / (double)sum_w;
-      if(loss_cnt > 0) m_stats[sid].rolling_avg_loss_r = sum_loss_r / (double)loss_cnt;
 
       if(InpUseAdaptiveSelfOpt && allow_suspend && samples >= g_cfg.min_trades_adapt)
       {
@@ -1198,7 +1150,7 @@ public:
       {
          m_stats[sid].suspended            = false;
          m_stats[sid].consecutive_losses   = 0;
-         m_stats[sid].rolling_expectancy_r = 0.10;
+         m_stats[sid].rolling_expectancy_r = 0.08;
          return true;
       }
       return false;
@@ -1210,7 +1162,7 @@ public:
       m_stats[sid].suspended          = false;
       m_stats[sid].consecutive_losses = 0;
       if(m_stats[sid].rolling_expectancy_r < 0.0)
-         m_stats[sid].rolling_expectancy_r = 0.10;
+         m_stats[sid].rolling_expectancy_r = 0.08;
    }
 
    double GetCalibratedWinProb(ENUM_STRATEGY_ID sid, double base_prior) const
@@ -1218,19 +1170,9 @@ public:
       if(!InpUseAdaptiveSelfOpt || m_stats[sid].rolling_count < g_cfg.min_trades_adapt)
          return base_prior;
 
-      double weight_emp = MathMin(0.60, (double)m_stats[sid].rolling_count / (double)(g_cfg.rolling_window_trades * 1.3));
+      double weight_emp = MathMin(0.65, (double)m_stats[sid].rolling_count / (double)(g_cfg.rolling_window_trades * 1.25));
       double blended    = (1.0 - weight_emp) * base_prior + weight_emp * m_stats[sid].rolling_win_rate;
-      return MathMax(0.35, MathMin(0.75, blended));
-   }
-
-   // Uses realized average win R vs theoretical TP R so expectancy matches actual exit behavior
-   double GetEffectiveRewardMultiplier(ENUM_STRATEGY_ID sid, double theoretical_rr) const
-   {
-      if(!InpUseAdaptiveSelfOpt || m_stats[sid].rolling_count < g_cfg.min_trades_adapt)
-         return 0.78; // Conservative initial realization factor accounting for partial close + trail
-
-      double realized_ratio = m_stats[sid].rolling_avg_win_r / MathMax(0.5, theoretical_rr);
-      return MathMax(0.50, MathMin(1.05, realized_ratio));
+      return MathMax(0.38, MathMin(0.80, blended));
    }
 
    double GetAdaptiveMultiplier(ENUM_STRATEGY_ID sid) const
@@ -1239,10 +1181,10 @@ public:
          return 1.00;
 
       double exp_r = m_stats[sid].rolling_expectancy_r;
-      if(exp_r > 0.30)  return 1.20;
-      if(exp_r > 0.10)  return 1.05;
-      if(exp_r > 0.00)  return 1.00;
-      return 0.85; // Never shrinks below 0.85x so winning trades recover drawdowns at full speed
+      if(exp_r > 0.30)  return 1.25;
+      if(exp_r > 0.12)  return 1.10;
+      if(exp_r >= 0.00) return 1.00;
+      return 0.85;
    }
 
    bool   IsSuspended(ENUM_STRATEGY_ID sid) const   { return m_stats[sid].suspended; }
@@ -1252,17 +1194,17 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| 4. Full-Strength Capital & Multi-Tranche Risk Manager            |
+//| 4. Capital Risk & ATH Re-Leveraging x Recovery (>1.0) Manager    |
 //+------------------------------------------------------------------+
 class CRiskAndCapitalManager
 {
 private:
    string   m_symbol;
    ulong    m_magic;
-   double   m_initial_deposit;
    double   m_daily_start_equity;
    double   m_ath_equity;
    double   m_dd_anchor_equity;
+   bool     m_in_ath_recovery;
    datetime m_cooldown_until;
    int      m_current_day_of_year;
    string   m_gv_ath_key;
@@ -1275,16 +1217,16 @@ public:
    {
       m_symbol          = symbol;
       m_magic           = magic;
+      m_in_ath_recovery = false;
       m_cooldown_until  = 0;
 
       long login      = AccountInfoInteger(ACCOUNT_LOGIN);
-      m_gv_ath_key    = StringFormat("MVX4_ATH_%I64d", login);
-      m_gv_anchor_key = StringFormat("MVX4_ANC_%I64d", login);
-      m_gv_daily_key  = StringFormat("MVX4_DAYEQ_%I64d", login);
-      m_gv_day_key    = StringFormat("MVX4_DOY_%I64d", login);
+      m_gv_ath_key    = StringFormat("MVX35_ATH_%I64d", login);
+      m_gv_anchor_key = StringFormat("MVX35_ANC_%I64d", login);
+      m_gv_daily_key  = StringFormat("MVX35_DAYEQ_%I64d", login);
+      m_gv_day_key    = StringFormat("MVX35_DOY_%I64d", login);
 
-      double eq         = AccountInfoDouble(ACCOUNT_EQUITY);
-      m_initial_deposit = eq;
+      double eq = AccountInfoDouble(ACCOUNT_EQUITY);
 
       MqlDateTime dt;
       TimeCurrent(dt);
@@ -1341,10 +1283,23 @@ public:
          }
       }
 
-      if(eq > m_ath_equity)
+      // Check ATH milestone: Once ATH is reclaimed or exceeded, reset back to Normal Rules (1.00x)
+      if(eq >= m_ath_equity)
       {
+         if(m_in_ath_recovery)
+         {
+            m_in_ath_recovery = false;
+            if(InpVerboseDiagnostics)
+               PrintFormat("[MIDAS VX ATH RECLAIMED] Equity $%.2f >= ATH $%.2f -> Resetting to Normal 1.00x Rules.", eq, m_ath_equity);
+         }
          m_ath_equity = eq;
          if(!MQLInfoInteger(MQL_TESTER)) GlobalVariableSet(m_gv_ath_key, m_ath_equity);
+      }
+      else
+      {
+         double dd_from_ath = ((m_ath_equity - eq) / m_ath_equity) * 100.0;
+         if(dd_from_ath >= InpATHRecoveryTriggerPct)
+            m_in_ath_recovery = true;
       }
 
       if(eq > m_dd_anchor_equity)
@@ -1355,7 +1310,15 @@ public:
    }
 
    double GetATHEquity() const      { return m_ath_equity; }
+   bool   IsInATHRecovery() const   { return m_in_ath_recovery; }
    double GetTodayPnLMoney() const  { return AccountInfoDouble(ACCOUNT_EQUITY) - m_daily_start_equity; }
+
+   double GetATHDeficitPct() const
+   {
+      double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+      if(m_ath_equity <= 0.0 || eq >= m_ath_equity) return 0.0;
+      return ((m_ath_equity - eq) / m_ath_equity) * 100.0;
+   }
 
    double GetTodayPnLPct() const
    {
@@ -1389,13 +1352,15 @@ public:
          if(now < m_cooldown_until)
          {
             int mins_left = (int)((m_cooldown_until - now) / 60) + 1;
-            reason = StringFormat("STORM PAUSE (%dm LEFT -> FULL 1.0x RESUME)", mins_left);
+            reason = StringFormat("COOLDOWN (%dm LEFT -> ATH RE-LEV)", mins_left);
             return true;
          }
          else
          {
             m_cooldown_until   = 0;
             m_dd_anchor_equity = AccountInfoDouble(ACCOUNT_EQUITY);
+            if(m_dd_anchor_equity < m_ath_equity)
+               m_in_ath_recovery = true;
             if(!MQLInfoInteger(MQL_TESTER)) GlobalVariableSet(m_gv_anchor_key, m_dd_anchor_equity);
          }
       }
@@ -1412,18 +1377,54 @@ public:
       if(cycle_dd >= g_cfg.max_cycle_dd_pct)
       {
          should_close_positions = true;
-         m_cooldown_until       = now + MathMax(15, InpDDCooldownMinutes) * 60;
-         reason = StringFormat("CYCLE DD GUARD (%.2f%%) -> %dm STORM PAUSE", cycle_dd, InpDDCooldownMinutes);
+         if(InpDDCooldownMinutes > 0)
+         {
+            m_cooldown_until = now + InpDDCooldownMinutes * 60;
+            reason = StringFormat("CYCLE DD GUARD (%.2f%%) -> %dm PAUSE", cycle_dd, InpDDCooldownMinutes);
+         }
+         else
+         {
+            m_dd_anchor_equity = AccountInfoDouble(ACCOUNT_EQUITY);
+            m_in_ath_recovery  = true;
+            reason = "CYCLE DD RESET -> ATH RE-LEVERAGE";
+         }
          return true;
       }
 
       return false;
    }
 
-   // Full-Strength Engine: Never becomes a "weak old man" after ATH; maintains 100% power
-   double GetStrengthMultiplier() const
+   // Core User Formula:
+   // - Normal Mode (at/above ATH): 1.00 x 1.00 = 1.00x (Baseline rules)
+   // - Loss from ATH Mode: Re-Leveraging (>1.0) x Recovery (>1.0) to recover funds back to ATH!
+   void GetReLeverageBreakdown(double &out_relev, double &out_recovery, double &out_combined) const
    {
-      return 1.00;
+      if(!m_in_ath_recovery)
+      {
+         out_relev    = 1.00;
+         out_recovery = 1.00;
+         out_combined = 1.00;
+         return;
+      }
+
+      double deficit_pct = GetATHDeficitPct();
+      double scale       = MathMin(1.0, deficit_pct / 25.0);
+
+      double relev_base = MathMax(1.01, InpReLeverageBase);
+      double relev_max  = MathMax(relev_base, InpReLeverageMax);
+      double rec_base   = MathMax(1.01, InpRecoveryBoostBase);
+      double rec_max    = MathMax(rec_base, InpRecoveryBoostMax);
+
+      out_relev    = relev_base + scale * (relev_max - relev_base);
+      out_recovery = rec_base   + scale * (rec_max   - rec_base);
+      out_combined = MathMin(MathMax(1.05, InpMaxCombinedRecoveryMult), out_relev * out_recovery);
+   }
+
+   double GetDrawdownRiskMultiplier() const
+   {
+      double r1 = 1.0, r2 = 1.0, combined = 1.0;
+      GetReLeverageBreakdown(r1, r2, combined);
+      return combined;
    }
 
    double CalculateCumulativeOpenRiskCurrency() const
@@ -1465,7 +1466,6 @@ public:
       return (CalculateCumulativeOpenRiskCurrency() / eq) * 100.0;
    }
 
-   // Returns total desired lots across up to InpMaxTranchesPerSignal orders (breaks broker max_lot wall)
    double ComputeValidatedTotalLots(double sl_distance_price, double strategy_mult, ENUM_ORDER_TYPE order_type,
                                     double entry_price, double &out_total_risk_money, string &reject_reason) const
    {
@@ -1485,15 +1485,22 @@ public:
          return 0.0;
       }
 
-      double risk_pct = g_cfg.risk_pct * GetStrengthMultiplier() * strategy_mult;
-      double ceiling  = (g_cfg.risk_mode == RISK_MODE_AGGRESSIVE) ? 1.40 :
-                        ((g_cfg.risk_mode == RISK_MODE_SUPER_AGGRESSIVE) ? 2.40 : 3.80);
-      if(InpCustomRiskPct > 0.0) ceiling = InpCustomRiskPct;
-      risk_pct = MathMin(risk_pct, ceiling);
+      double ath_mult = GetDrawdownRiskMultiplier(); // 1.00x Normal, or >1.00x (Re-Leveraging x Recovery) below ATH
+      double risk_pct = g_cfg.risk_pct * ath_mult * strategy_mult;
+
+      double base_ceiling = (g_cfg.risk_mode == RISK_MODE_AGGRESSIVE) ? 1.50 :
+                            ((g_cfg.risk_mode == RISK_MODE_SUPER_AGGRESSIVE) ? 2.50 : 4.00);
+      if(InpCustomRiskPct > 0.0) base_ceiling = InpCustomRiskPct;
+
+      // Expand risk ceiling proportionally during ATH Re-Leveraging so recovery boost is never clipped
+      double effective_ceiling = base_ceiling * ath_mult;
+      risk_pct = MathMin(risk_pct, effective_ceiling);
 
       double target_risk_money = capital_base * (risk_pct / 100.0);
 
-      double max_cum_money    = equity * (g_cfg.max_cum_risk_pct / 100.0);
+      // Expand cumulative cap proportionally during ATH Recovery mode
+      double max_cum_pct      = g_cfg.max_cum_risk_pct * (m_in_ath_recovery ? MathMin(1.50, ath_mult) : 1.0);
+      double max_cum_money    = equity * (max_cum_pct / 100.0);
       double open_cum_money   = CalculateCumulativeOpenRiskCurrency();
       double remaining_budget = max_cum_money - open_cum_money;
       if(remaining_budget <= 0.0)
@@ -1533,11 +1540,11 @@ public:
       double norm_lots = MathFloor(raw_lots / lot_step) * lot_step;
       norm_lots = NormalizeDouble(norm_lots, 2);
 
-      // Prevents micro-account starvation at $200-$1000 so account can always compound back up
+      // Micro-Equity Floor so $200-$1000 accounts never stall at 0.00 lots
       if(norm_lots < min_lot)
       {
          double min_lot_risk = min_lot * loss_per_lot;
-         if(InpAllowMinLotFloor && equity >= 120.0 && min_lot_risk <= equity * 0.045)
+         if(InpAllowMinLotFloor && equity >= 100.0 && min_lot_risk <= equity * 0.05)
             norm_lots = min_lot;
          else
          {
@@ -1572,7 +1579,7 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| 5. High-Payoff XAUUSD Signal & Empirical Expectancy Engine       |
+//| 5. Classic High-Frequency Signal & Expectancy Engine             |
 //+------------------------------------------------------------------+
 class CSignalScoringEngine
 {
@@ -1610,10 +1617,10 @@ private:
 
       double spread_price  = ask - bid;
       long   stops_level   = SymbolInfoInteger(m_symbol, SYMBOL_TRADE_STOPS_LEVEL);
-      double min_stop_dist = MathMax((double)(stops_level + 5) * point, spread_price * 2.5);
+      double min_stop_dist = MathMax((double)(stops_level + 5) * point, spread_price * 2.0);
 
       if(sl_dist_price < min_stop_dist) sl_dist_price = min_stop_dist;
-      if(tp_dist_price < sl_dist_price * 1.85) tp_dist_price = sl_dist_price * 1.85;
+      if(tp_dist_price < sl_dist_price * 1.20) tp_dist_price = sl_dist_price * 1.20;
 
       double entry = (dir > 0) ? ask : bid;
       double sl    = (dir > 0) ? (entry - sl_dist_price) : (entry + sl_dist_price);
@@ -1623,22 +1630,19 @@ private:
       sl    = NormalizePriceToTick(m_symbol, sl);
       tp    = NormalizePriceToTick(m_symbol, tp);
 
-      double reward_pts     = tp_dist_price / point;
-      double risk_pts       = sl_dist_price / point;
-      double theoretical_rr = reward_pts / risk_pts;
-      double cost_pts       = CalculateCostInPoints(point, micro) + micro.estimated_slippage_pts;
+      double reward_pts  = tp_dist_price / point;
+      double risk_pts    = sl_dist_price / point;
+      double cost_pts    = CalculateCostInPoints(point, micro) + micro.estimated_slippage_pts;
+      double cal_prob    = stats.GetCalibratedWinProb(sid, base_win_prob);
 
-      double cal_prob       = stats.GetCalibratedWinProb(sid, base_win_prob);
-      double eff_reward_pts = reward_pts * stats.GetEffectiveRewardMultiplier(sid, theoretical_rr);
-
-      double net_exp_pts = (cal_prob * eff_reward_pts) - ((1.0 - cal_prob) * risk_pts) - cost_pts;
+      double net_exp_pts = (cal_prob * reward_pts) - ((1.0 - cal_prob) * risk_pts) - cost_pts;
       double net_exp_r   = net_exp_pts / risk_pts;
 
       if(net_exp_pts <= 0.0 || net_exp_r < g_cfg.min_expectancy_r)
          return;
 
       double adapt_mult = stats.GetAdaptiveMultiplier(sid);
-      double score      = net_exp_r * mtf.seasonality_score * adapt_mult * (1.0 + 0.30 * MathAbs(micro.tick_imbalance));
+      double score      = net_exp_r * mtf.seasonality_score * adapt_mult * (1.0 + 0.25 * MathAbs(micro.tick_imbalance));
 
       cand.valid               = true;
       cand.strategy            = sid;
@@ -1647,7 +1651,7 @@ private:
       cand.sl_price            = sl;
       cand.tp_price            = tp;
       cand.win_prob            = cal_prob;
-      cand.expected_reward_pts = eff_reward_pts;
+      cand.expected_reward_pts = reward_pts;
       cand.expected_risk_pts   = risk_pts;
       cand.total_cost_pts      = cost_pts;
       cand.net_expectancy_pts  = net_exp_pts;
@@ -1666,10 +1670,6 @@ public:
       SSignalCandidate best;
       best.Reset();
 
-      // Chop Shield: Block dead sideways markets that cause slow bleed
-      if(mtf.current_regime == REGIME_CHOPPY_LOW_EDGE)
-         return best;
-
       datetime now = TimeCurrent();
       double atr = mtf.m1_atr[0];
       if(atr <= 0.0) return best;
@@ -1679,33 +1679,33 @@ public:
 
       SSignalCandidate cand;
 
-      // S0: ULTRA-FAST GOLD MOMENTUM SCALPING (Aligned with H1 & M5 Trend)
+      // S0: ULTRA-FAST GOLD MOMENTUM SCALPING
       if(g_cfg.strat_enabled[STRAT_ULTRA_MOMENTUM] && stats.IsStrategyAvailable(STRAT_ULTRA_MOMENTUM, now))
       {
          cand.Reset();
-         if(micro.tick_velocity >= g_cfg.min_tick_velocity && mtf.m5_adx[0] >= InpMinM5_ADX_Trend)
+         if(micro.tick_velocity >= g_cfg.min_tick_velocity)
          {
-            if(mtf.h1_trend_dir > 0 &&
-               mtf.m1_ema_fast[0] > mtf.m1_ema_slow[0] &&
+            if(mtf.m1_ema_fast[0] > mtf.m1_ema_slow[0] &&
                ask > mtf.m1_ema_fast[0] &&
-               micro.tick_imbalance >= 0.32 &&
+               micro.tick_imbalance >= 0.24 &&
                micro.price_velocity_pts > 0.0 &&
-               mtf.m1_rsi[0] > 54.0 && mtf.m1_rsi[0] < 78.0)
+               mtf.m1_rsi[0] > 52.0 && mtf.m1_rsi[0] < 80.0 &&
+               mtf.h1_trend_dir >= 0)
             {
-               double prob = 0.54 + MathMin(0.08, micro.tick_imbalance * 0.10);
+               double prob = 0.56 + MathMin(0.10, micro.tick_imbalance * 0.12);
                FinalizeCandidate(cand, STRAT_ULTRA_MOMENTUM, 1,
                                  atr * g_cfg.sl_atr_mult,
                                  atr * g_cfg.tp_atr_mult,
                                  prob, micro, mtf, stats);
             }
-            else if(mtf.h1_trend_dir < 0 &&
-                    mtf.m1_ema_fast[0] < mtf.m1_ema_slow[0] &&
+            else if(mtf.m1_ema_fast[0] < mtf.m1_ema_slow[0] &&
                     bid < mtf.m1_ema_fast[0] &&
-                    micro.tick_imbalance <= -0.32 &&
+                    micro.tick_imbalance <= -0.24 &&
                     micro.price_velocity_pts < 0.0 &&
-                    mtf.m1_rsi[0] < 46.0 && mtf.m1_rsi[0] > 22.0)
+                    mtf.m1_rsi[0] < 48.0 && mtf.m1_rsi[0] > 20.0 &&
+                    mtf.h1_trend_dir <= 0)
             {
-               double prob = 0.54 + MathMin(0.08, MathAbs(micro.tick_imbalance) * 0.10);
+               double prob = 0.56 + MathMin(0.10, MathAbs(micro.tick_imbalance) * 0.12);
                FinalizeCandidate(cand, STRAT_ULTRA_MOMENTUM, -1,
                                  atr * g_cfg.sl_atr_mult,
                                  atr * g_cfg.tp_atr_mult,
@@ -1715,57 +1715,54 @@ public:
          if(cand.valid && cand.score > best.score) best = cand;
       }
 
-      // S1: GOLD LIQUIDITY SWEEP REVERSAL (M15 Institutional Swing Sweep)
+      // S1: LIQUIDITY SWEEP REVERSAL (M15 Swing Sweep)
       if(g_cfg.strat_enabled[STRAT_LIQUIDITY_SWEEP] && stats.IsStrategyAvailable(STRAT_LIQUIDITY_SWEEP, now))
       {
          cand.Reset();
          bool bull_sweep = (mtf.m1_low[0] < mtf.m15_swing_low &&
                             mtf.m1_close[0] > mtf.m1_open[0] &&
-                            (mtf.m1_close[0] - mtf.m1_low[0]) > atr * 0.75 &&
-                            micro.tick_imbalance >= 0.28);
+                            (mtf.m1_close[0] - mtf.m1_low[0]) > atr * 0.65 &&
+                            micro.tick_imbalance >= 0.20);
 
          bool bear_sweep = (mtf.m1_high[0] > mtf.m15_swing_high &&
                             mtf.m1_close[0] < mtf.m1_open[0] &&
-                            (mtf.m1_high[0] - mtf.m1_close[0]) > atr * 0.75 &&
-                            micro.tick_imbalance <= -0.28);
+                            (mtf.m1_high[0] - mtf.m1_close[0]) > atr * 0.65 &&
+                            micro.tick_imbalance <= -0.20);
 
          if(bull_sweep)
          {
-            double wick_sl = MathMax(atr * 1.40, (ask - mtf.m1_low[0]) + atr * 0.35);
-            FinalizeCandidate(cand, STRAT_LIQUIDITY_SWEEP, 1, wick_sl, wick_sl * 2.10, 0.55, micro, mtf, stats);
+            double wick_sl = MathMax(atr * 1.25, (ask - mtf.m1_low[0]) + atr * 0.30);
+            FinalizeCandidate(cand, STRAT_LIQUIDITY_SWEEP, 1, wick_sl, wick_sl * 1.75, 0.58, micro, mtf, stats);
          }
          else if(bear_sweep)
          {
-            double wick_sl = MathMax(atr * 1.40, (mtf.m1_high[0] - bid) + atr * 0.35);
-            FinalizeCandidate(cand, STRAT_LIQUIDITY_SWEEP, -1, wick_sl, wick_sl * 2.10, 0.55, micro, mtf, stats);
+            double wick_sl = MathMax(atr * 1.25, (mtf.m1_high[0] - bid) + atr * 0.30);
+            FinalizeCandidate(cand, STRAT_LIQUIDITY_SWEEP, -1, wick_sl, wick_sl * 1.75, 0.58, micro, mtf, stats);
          }
          if(cand.valid && cand.score > best.score) best = cand;
       }
 
-      // S2: QUANTITATIVE MEAN REVERSION (Range-Bound Extremes Only)
+      // S2: QUANTITATIVE MEAN REVERSION
       if(g_cfg.strat_enabled[STRAT_MEAN_REVERSION] && stats.IsStrategyAvailable(STRAT_MEAN_REVERSION, now))
       {
          cand.Reset();
-         if(mtf.h1_adx[0] < 26.0 && mtf.m1_autocorr_lag1 < 0.0)
+         if(mtf.m1_low[0] <= mtf.m1_bb_lower[0] &&
+            mtf.m1_close[0] > mtf.m1_bb_lower[0] &&
+            mtf.m1_rsi[0] < 32.0 &&
+            micro.tick_imbalance >= 0.14)
          {
-            if(mtf.m1_low[0] <= mtf.m1_bb_lower[0] &&
-               mtf.m1_close[0] > mtf.m1_bb_lower[0] &&
-               mtf.m1_rsi[0] < 28.0 &&
-               micro.tick_imbalance >= 0.18)
-            {
-               double sl_d      = atr * 1.45;
-               double target_tp = MathMax(sl_d * 1.95, mtf.m1_bb_upper[0] - ask);
-               FinalizeCandidate(cand, STRAT_MEAN_REVERSION, 1, sl_d, target_tp, 0.56, micro, mtf, stats);
-            }
-            else if(mtf.m1_high[0] >= mtf.m1_bb_upper[0] &&
-                    mtf.m1_close[0] < mtf.m1_bb_upper[0] &&
-                    mtf.m1_rsi[0] > 72.0 &&
-                    micro.tick_imbalance <= -0.18)
-            {
-               double sl_d      = atr * 1.45;
-               double target_tp = MathMax(sl_d * 1.95, bid - mtf.m1_bb_lower[0]);
-               FinalizeCandidate(cand, STRAT_MEAN_REVERSION, -1, sl_d, target_tp, 0.56, micro, mtf, stats);
-            }
+            double sl_d      = atr * 1.30;
+            double target_tp = MathMax(sl_d * 1.50, mtf.m1_bb_mid[0] - ask);
+            FinalizeCandidate(cand, STRAT_MEAN_REVERSION, 1, sl_d, target_tp, 0.60, micro, mtf, stats);
+         }
+         else if(mtf.m1_high[0] >= mtf.m1_bb_upper[0] &&
+                 mtf.m1_close[0] < mtf.m1_bb_upper[0] &&
+                 mtf.m1_rsi[0] > 68.0 &&
+                 micro.tick_imbalance <= -0.14)
+         {
+            double sl_d      = atr * 1.30;
+            double target_tp = MathMax(sl_d * 1.50, bid - mtf.m1_bb_mid[0]);
+            FinalizeCandidate(cand, STRAT_MEAN_REVERSION, -1, sl_d, target_tp, 0.60, micro, mtf, stats);
          }
          if(cand.valid && cand.score > best.score) best = cand;
       }
@@ -1775,23 +1772,21 @@ public:
       {
          cand.Reset();
          double bar_range     = mtf.m1_high[0] - mtf.m1_low[0];
-         bool   atr_expanding = (mtf.m1_atr[0] > mtf.m1_atr[1] * 1.08 && bar_range > atr * 1.40);
+         bool   atr_expanding = (mtf.m1_atr[0] > mtf.m1_atr[1] * 1.03 && bar_range > atr * 1.25);
 
          if(atr_expanding && micro.tick_velocity >= g_cfg.min_tick_velocity)
          {
-            if(mtf.h1_trend_dir >= 0 &&
-               mtf.m1_close[0] > mtf.m1_bb_upper[0] &&
+            if(mtf.m1_close[0] > mtf.m1_bb_upper[0] &&
                mtf.m1_close[1] <= mtf.m1_bb_upper[1] &&
-               micro.tick_imbalance >= 0.28)
+               micro.tick_imbalance >= 0.22)
             {
-               FinalizeCandidate(cand, STRAT_VOL_EXPLOSION, 1, atr * 1.55, atr * 3.25, 0.53, micro, mtf, stats);
+               FinalizeCandidate(cand, STRAT_VOL_EXPLOSION, 1, atr * 1.40, atr * 2.35, 0.55, micro, mtf, stats);
             }
-            else if(mtf.h1_trend_dir <= 0 &&
-                    mtf.m1_close[0] < mtf.m1_bb_lower[0] &&
+            else if(mtf.m1_close[0] < mtf.m1_bb_lower[0] &&
                     mtf.m1_close[1] >= mtf.m1_bb_lower[1] &&
-                    micro.tick_imbalance <= -0.28)
+                    micro.tick_imbalance <= -0.22)
             {
-               FinalizeCandidate(cand, STRAT_VOL_EXPLOSION, -1, atr * 1.55, atr * 3.25, 0.53, micro, mtf, stats);
+               FinalizeCandidate(cand, STRAT_VOL_EXPLOSION, -1, atr * 1.40, atr * 2.35, 0.55, micro, mtf, stats);
             }
          }
          if(cand.valid && cand.score > best.score) best = cand;
@@ -1801,32 +1796,27 @@ public:
       if(g_cfg.strat_enabled[STRAT_TREND_IMPULSE] && stats.IsStrategyAvailable(STRAT_TREND_IMPULSE, now))
       {
          cand.Reset();
-         if(mtf.m5_adx[0] >= InpMinM5_ADX_Trend)
+         if(mtf.m1_ema_fast[0] > mtf.m1_ema_slow[0] &&
+            mtf.m1_low[1] <= mtf.m1_ema_fast[1] &&
+            mtf.m1_close[0] > mtf.m1_ema_fast[0] &&
+            mtf.m1_close[0] > mtf.m1_open[0] &&
+            micro.tick_imbalance >= 0.16)
          {
-            if(mtf.h1_trend_dir > 0 &&
-               mtf.m1_ema_fast[0] > mtf.m1_ema_slow[0] &&
-               mtf.m1_low[1] <= mtf.m1_ema_fast[1] &&
-               mtf.m1_close[0] > mtf.m1_ema_fast[0] &&
-               mtf.m1_close[0] > mtf.m1_open[0] &&
-               micro.tick_imbalance >= 0.22)
-            {
-               FinalizeCandidate(cand, STRAT_TREND_IMPULSE, 1,
-                                 atr * g_cfg.sl_atr_mult,
-                                 atr * g_cfg.tp_atr_mult,
-                                 0.55, micro, mtf, stats);
-            }
-            else if(mtf.h1_trend_dir < 0 &&
-                    mtf.m1_ema_fast[0] < mtf.m1_ema_slow[0] &&
-                    mtf.m1_high[1] >= mtf.m1_ema_fast[1] &&
-                    mtf.m1_close[0] < mtf.m1_ema_fast[0] &&
-                    mtf.m1_close[0] < mtf.m1_open[0] &&
-                    micro.tick_imbalance <= -0.22)
-            {
-               FinalizeCandidate(cand, STRAT_TREND_IMPULSE, -1,
-                                 atr * g_cfg.sl_atr_mult,
-                                 atr * g_cfg.tp_atr_mult,
-                                 0.55, micro, mtf, stats);
-            }
+            FinalizeCandidate(cand, STRAT_TREND_IMPULSE, 1,
+                              atr * g_cfg.sl_atr_mult,
+                              atr * g_cfg.tp_atr_mult,
+                              0.58, micro, mtf, stats);
+         }
+         else if(mtf.m1_ema_fast[0] < mtf.m1_ema_slow[0] &&
+                 mtf.m1_high[1] >= mtf.m1_ema_fast[1] &&
+                 mtf.m1_close[0] < mtf.m1_ema_fast[0] &&
+                 mtf.m1_close[0] < mtf.m1_open[0] &&
+                 micro.tick_imbalance <= -0.16)
+         {
+            FinalizeCandidate(cand, STRAT_TREND_IMPULSE, -1,
+                              atr * g_cfg.sl_atr_mult,
+                              atr * g_cfg.tp_atr_mult,
+                              0.58, micro, mtf, stats);
          }
          if(cand.valid && cand.score > best.score) best = cand;
       }
@@ -1836,7 +1826,7 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| 6. Multi-Tranche Execution & High-Payoff Position Manager        |
+//| 6. Multi-Tranche Execution & Classic Scalping Position Manager   |
 //+------------------------------------------------------------------+
 class CExecutionEngine
 {
@@ -1919,7 +1909,6 @@ public:
       return true;
    }
 
-   // Splits total_lots into multiple tranches automatically if total_lots > broker max_lot
    bool ExecuteCandidate(const SSignalCandidate &cand, double total_lots, double total_risk_money, datetime bar_m1)
    {
       if(!cand.valid || total_lots <= 0.0) return false;
@@ -2083,11 +2072,11 @@ public:
          double unrealized_dist = (pos_type == POSITION_TYPE_BUY) ? (cur_px - open_px) : (open_px - cur_px);
          double true_rr         = unrealized_dist / initial_risk;
 
-         // 1. Late Momentum Reversal Protection (Only above +1.20R so runners develop)
-         if(InpUseMomentumExit && true_rr >= 1.20)
+         // 1. Classic Momentum Reversal Exit above +0.55R
+         if(InpUseMomentumExit && true_rr >= 0.55)
          {
-            bool rev_flip = (pos_type == POSITION_TYPE_BUY  && micro.tick_imbalance <= -0.65 && micro.price_velocity_pts < 0.0) ||
-                            (pos_type == POSITION_TYPE_SELL && micro.tick_imbalance >=  0.65 && micro.price_velocity_pts > 0.0);
+            bool rev_flip = (pos_type == POSITION_TYPE_BUY  && micro.tick_imbalance <= -0.58 && micro.price_velocity_pts < 0.0) ||
+                            (pos_type == POSITION_TYPE_SELL && micro.tick_imbalance >=  0.58 && micro.price_velocity_pts > 0.0);
             if(rev_flip)
             {
                m_trade.PositionClose(ticket, g_cfg.slippage_dev);
@@ -2095,7 +2084,7 @@ public:
             }
          }
 
-         // 2. Late 30% Partial Profit Lock at +1.55R (Leaves 70% runner to hit full 2.0R TP)
+         // 2. Classic Partial Profit Lock at +1.05R (50%) + Breakeven SL
          if(InpUsePartialClose && true_rr >= g_cfg.partial_close_rr && !is_part_done)
          {
             double close_vol = MathFloor((vol * (g_cfg.partial_close_pct / 100.0)) / lot_step) * lot_step;
@@ -2105,7 +2094,7 @@ public:
                if(m_trade.PositionClosePartial(ticket, close_vol, g_cfg.slippage_dev))
                {
                   g_pos_reg.MarkPartialClosed(pos_id);
-                  double be_buffer = MathMax(2.0 * point, (SymbolInfoDouble(m_symbol, SYMBOL_ASK) - SymbolInfoDouble(m_symbol, SYMBOL_BID)) * 0.25);
+                  double be_buffer = MathMax(2.0 * point, (SymbolInfoDouble(m_symbol, SYMBOL_ASK) - SymbolInfoDouble(m_symbol, SYMBOL_BID)) * 0.20);
                   double be_sl = (pos_type == POSITION_TYPE_BUY) ? (open_px + be_buffer) : (open_px - be_buffer);
                   be_sl = NormalizePriceToTick(m_symbol, be_sl);
                   if(MathAbs(cur_px - be_sl) >= min_dist)
@@ -2115,7 +2104,7 @@ public:
             }
          }
 
-         // 3. Breathing ATR Trailing Stop (Activates at +1.35R with 0.75 ATR room)
+         // 3. Classic Dynamic ATR Trailing Stop at +0.85R
          if(InpUseTrailingStop && true_rr >= g_cfg.trail_act_rr)
          {
             double trail_dist = MathMax(min_dist, atr * g_cfg.trail_step_atr);
@@ -2281,57 +2270,57 @@ public:
 
       if(m_minimized)
       {
-         CreateRect("BG_MIN", x, y, w, 34, C_BG_MAIN, C_AMBER);
-         CreateRect("TOP_BAR", x, y, w, 3, C_AMBER, C_AMBER);
-         CreateLabel("HDR_TITLE", x + 10, y + 9, "MIDAS VX V4.0 UNLIMITED // " + _Symbol, C_TEXT_PRI, 9, "Segoe UI Bold");
+         CreateRect("BG_MIN", x, y, w, 34, C_BG_MAIN, C_CYAN);
+         CreateRect("TOP_BAR", x, y, w, 3, C_CYAN, C_CYAN);
+         CreateLabel("HDR_TITLE", x + 10, y + 9, "MIDAS VX V3.5 // " + _Symbol, C_TEXT_PRI, 9, "Segoe UI Bold");
          CreateLabel("HDR_BADGE", x + 235, y + 10, RiskModeName(g_cfg.risk_mode), C_AMBER, 8, "Consolas");
-         CreateButton("BTN_MIN", x + w - 30, y + 6, 22, 22, "+", C_AMBER, C_BG_CARD, C_BORDER, 10);
+         CreateButton("BTN_MIN", x + w - 30, y + 6, 22, 22, "+", C_CYAN, C_BG_CARD, C_BORDER, 10);
          ChartRedraw(0);
          return;
       }
 
       int total_h = 548;
       CreateRect("BG_MAIN", x, y, w, total_h, C_BG_MAIN, C_BORDER);
-      CreateRect("TOP_BAR", x, y, w, 3, C_AMBER, C_AMBER);
-      CreateLabel("HDR_TITLE", x + 12, y + 9, "MIDAS VX V4.0 // XAUUSD UNLIMITED", C_TEXT_PRI, 9, "Segoe UI Bold");
-      CreateLabel("HDR_SUB", x + 254, y + 10, _Symbol, C_AMBER, 8, "Consolas");
+      CreateRect("TOP_BAR", x, y, w, 3, C_CYAN, C_CYAN);
+      CreateLabel("HDR_TITLE", x + 12, y + 9, "MIDAS VX V3.5 // ATH RE-LEVERAGE", C_TEXT_PRI, 9, "Segoe UI Bold");
+      CreateLabel("HDR_SUB", x + 258, y + 10, _Symbol, C_CYAN, 8, "Consolas");
       CreateButton("BTN_MIN", x + w - 30, y + 6, 22, 22, "_", C_TEXT_PRI, C_BG_CARD, C_BORDER, 9);
 
       int c1_y = y + 36;
       CreateRect("CARD_MODE", x + 8, c1_y, w - 16, 68, C_BG_CARD, C_BORDER);
-      CreateLabel("LBL_MODE_HDR", x + 16, c1_y + 6, "XAUUSD RISK PROFILE (FULL-STRENGTH ENGINE)", C_TEXT_SEC, 7, "Segoe UI Bold");
+      CreateLabel("LBL_MODE_HDR", x + 16, c1_y + 6, "DYNAMIC RISK PROFILE (CLICK TO SWITCH)", C_TEXT_SEC, 7, "Segoe UI Bold");
 
       int btn_w = 110;
       CreateButton("BTN_MODE_0", x + 14,  c1_y + 22, btn_w, 24, "1. AGGRESSIVE", C_TEXT_SEC, C_BTN_IDLE, C_BORDER, 7);
       CreateButton("BTN_MODE_1", x + 129, c1_y + 22, btn_w, 24, "2. SUPER AGGR", C_TEXT_SEC, C_BTN_IDLE, C_BORDER, 7);
       CreateButton("BTN_MODE_2", x + 244, c1_y + 22, btn_w, 24, "3. EXTREME RES", C_TEXT_SEC, C_BTN_IDLE, C_BORDER, 7);
-      CreateLabel("LBL_MODE_SPEC", x + 16, c1_y + 50, "Risk: 1.85% | Daily: 7.0% | CycleDD: 24.0% | ExpR>=0.14", C_AMBER, 8, "Consolas");
+      CreateLabel("LBL_MODE_SPEC", x + 16, c1_y + 50, "Risk: 1.85% | Daily: 8.0% | CycleDD: 26.0% | ExpR>=0.06", C_AMBER, 8, "Consolas");
 
       int c2_y = c1_y + 74;
       CreateRect("CARD_RISK", x + 8, c2_y, w - 16, 134, C_BG_CARD, C_BORDER);
-      CreateLabel("LBL_RISK_HDR", x + 16, c2_y + 6, "CAPITAL, ATH & FULL-STRENGTH TELEMETRY", C_TEXT_SEC, 7, "Segoe UI Bold");
+      CreateLabel("LBL_RISK_HDR", x + 16, c2_y + 6, "ATH PEAK & RE-LEVERAGING x RECOVERY (>1.0)", C_TEXT_SEC, 7, "Segoe UI Bold");
 
       CreateLabel("VAL_EQ_BAL", x + 16, c2_y + 22, "Equity: $0.00  |  Balance: $0.00", C_TEXT_PRI, 8, "Consolas");
-      CreateLabel("VAL_ATH_EQ", x + 16, c2_y + 38, "ATH Peak: $0.00  |  Power: 1.00x (FULL)", C_AMBER, 8, "Consolas");
+      CreateLabel("VAL_ATH_RELEV", x + 16, c2_y + 38, "ATH: $0.00 | NORMAL 1.00x (1.00x1.00)", C_EMERALD, 8, "Consolas");
       CreateLabel("VAL_TODAY_PNL", x + 16, c2_y + 54, "Today P&L: $0.00 (0.00%)", C_EMERALD, 8, "Consolas");
 
-      CreateLabel("LBL_DAILY_BAR", x + 16, c2_y + 72, "Daily Loss: 0.00% / 7.00%", C_TEXT_SEC, 7, "Consolas");
+      CreateLabel("LBL_DAILY_BAR", x + 16, c2_y + 72, "Daily Loss: 0.00% / 8.00%", C_TEXT_SEC, 7, "Consolas");
       CreateRect("BAR_DAILY_BG", x + 188, c2_y + 74, 160, 8, C_BG_MAIN, C_BORDER);
       CreateRect("BAR_DAILY_FG", x + 189, c2_y + 75, 2, 6, C_EMERALD, C_EMERALD);
 
-      CreateLabel("LBL_DD_BAR", x + 16, c2_y + 90, "Cycle DD:   0.00% / 24.00%", C_TEXT_SEC, 7, "Consolas");
+      CreateLabel("LBL_DD_BAR", x + 16, c2_y + 90, "Cycle DD:   0.00% / 26.00%", C_TEXT_SEC, 7, "Consolas");
       CreateRect("BAR_DD_BG", x + 188, c2_y + 92, 160, 8, C_BG_MAIN, C_BORDER);
       CreateRect("BAR_DD_FG", x + 189, c2_y + 93, 2, 6, C_CYAN, C_CYAN);
 
-      CreateLabel("VAL_CUM_RISK", x + 16, c2_y + 110, "CumRisk: 0.00% / 6.50%  |  Pos: 0 / 8", C_TEXT_PRI, 8, "Consolas");
+      CreateLabel("VAL_CUM_RISK", x + 16, c2_y + 110, "CumRisk: 0.00% / 8.00%  |  Pos: 0 / 12", C_TEXT_PRI, 8, "Consolas");
 
       int c3_y = c2_y + 140;
       CreateRect("CARD_MICRO", x + 8, c3_y, w - 16, 94, C_BG_CARD, C_BORDER);
-      CreateLabel("LBL_MICRO_HDR", x + 16, c3_y + 6, "XAUUSD MICROSTRUCTURE & CHOP SHIELD", C_TEXT_SEC, 7, "Segoe UI Bold");
+      CreateLabel("LBL_MICRO_HDR", x + 16, c3_y + 6, "MICROSTRUCTURE & COST TELEMETRY", C_TEXT_SEC, 7, "Segoe UI Bold");
 
-      CreateLabel("VAL_REGIME", x + 16, c3_y + 22, "INITIALIZING | H1: NEUTRAL", C_CYAN, 8, "Consolas");
+      CreateLabel("VAL_REGIME", x + 16, c3_y + 22, "REGIME: INITIALIZING | H1: NEUTRAL", C_CYAN, 8, "Consolas");
       CreateLabel("VAL_VEL_SPR", x + 16, c3_y + 39, "TickVel: 0.0/s | Spr: 0.0p (0.00 ATR)", C_TEXT_PRI, 8, "Consolas");
-      CreateLabel("VAL_AC_SLIP", x + 16, c3_y + 55, "M5 ADX: 0.0 | Comm: $0.0/L | Slip: 0.3p", C_TEXT_SEC, 8, "Consolas");
+      CreateLabel("VAL_AC_SLIP", x + 16, c3_y + 55, "AC(1): +0.00 | Comm: $0.0/L | Slip: 0.25p", C_TEXT_SEC, 8, "Consolas");
 
       CreateLabel("LBL_IMB", x + 16, c3_y + 73, "Tick Imbalance:  0%", C_TEXT_PRI, 8, "Consolas");
       CreateRect("BAR_IMB_BG", x + 188, c3_y + 75, 160, 8, C_BG_MAIN, C_BORDER);
@@ -2348,7 +2337,7 @@ public:
          string idx_s = IntegerToString(i);
          CreateLabel("S_NAME_" + idx_s, x + 16, row_y + 2, StrategyName((ENUM_STRATEGY_ID)i), C_TEXT_PRI, 8, "Consolas");
          CreateButton("BTN_STRAT_" + idx_s, x + 150, row_y, 42, 17, "ON", C_BG_MAIN, C_EMERALD, C_EMERALD, 7);
-         CreateLabel("S_STATS_" + idx_s, x + 198, row_y + 2, "  0   +$0.00   +0.22R", C_TEXT_SEC, 8, "Consolas");
+         CreateLabel("S_STATS_" + idx_s, x + 198, row_y + 2, "  0   +$0.00   +0.25R", C_TEXT_SEC, 8, "Consolas");
       }
 
       int s_y = c4_y + 136;
@@ -2424,7 +2413,18 @@ public:
       double bal = AccountInfoDouble(ACCOUNT_BALANCE);
       double ath = risk.GetATHEquity();
       SetText("VAL_EQ_BAL", StringFormat("Equity: $%.2f | Bal: $%.2f", eq, bal), C_TEXT_PRI);
-      SetText("VAL_ATH_EQ", StringFormat("ATH Peak: $%.2f | Power: %.2fx FULL", ath, risk.GetStrengthMultiplier()), C_AMBER);
+
+      double r_lev = 1.0, r_rec = 1.0, r_comb = 1.0;
+      risk.GetReLeverageBreakdown(r_lev, r_rec, r_comb);
+      if(risk.IsInATHRecovery())
+      {
+         SetText("VAL_ATH_RELEV", StringFormat("ATH:$%.0f(-%.1f%%) RE-LEV %.2fx%.2f=%.2fx",
+                 ath, risk.GetATHDeficitPct(), r_lev, r_rec, r_comb), C_AMBER);
+      }
+      else
+      {
+         SetText("VAL_ATH_RELEV", StringFormat("ATH:$%.0f | NORMAL 1.00x (1.00x1.00)", ath), C_EMERALD);
+      }
 
       double pnl_m = risk.GetTodayPnLMoney();
       double pnl_p = risk.GetTodayPnLPct();
@@ -2456,8 +2456,7 @@ public:
               cum_r, g_cfg.max_cum_risk_pct, open_pos, max_pos), C_TEXT_PRI);
 
       string h1_txt = (mtf.h1_trend_dir > 0) ? "BULL ▲" : ((mtf.h1_trend_dir < 0) ? "BEAR ▼" : "FLAT ◆");
-      color  reg_c  = (mtf.current_regime == REGIME_CHOPPY_LOW_EDGE) ? C_AMBER : C_CYAN;
-      SetText("VAL_REGIME", StringFormat("%s | H1:%s", RegimeName(mtf.current_regime), h1_txt), reg_c);
+      SetText("VAL_REGIME", StringFormat("%s | H1:%s", RegimeName(mtf.current_regime), h1_txt), C_CYAN);
 
       double point     = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
       double pip_scale = GetGoldPipScale(_Symbol);
@@ -2469,8 +2468,8 @@ public:
               micro.tick_velocity, spr_pips, spr_rat), spr_clr);
 
       double slip_pips = (pip_scale > 0.0) ? (micro.estimated_slippage_pts / pip_scale) : 0.0;
-      SetText("VAL_AC_SLIP", StringFormat("M5 ADX:%.1f | Comm:$%.1f/L | Slip:%.2fp",
-              mtf.m5_adx[0], micro.GetEffectiveCommissionPerLot(), slip_pips), C_TEXT_SEC);
+      SetText("VAL_AC_SLIP", StringFormat("AC(1):%+.2f | Comm:$%.1f/L | Slip:%.2fp",
+              mtf.m1_autocorr_lag1, micro.GetEffectiveCommissionPerLot(), slip_pips), C_TEXT_SEC);
 
       double imb = MathMax(-1.0, MathMin(1.0, micro.tick_imbalance));
       SetText("LBL_IMB", StringFormat("Tick Imbalance: %+4.0f%%", imb * 100.0), (imb >= 0.0 ? C_EMERALD : C_CRIMSON));
@@ -2626,7 +2625,7 @@ CExecutionEngine       g_exec;
 CMidasDashboardPanel   g_panel;
 
 //+------------------------------------------------------------------+
-//| XAUUSD Session & Spread Filter Validation                        |
+//| Session & Spread Filter Validation                               |
 //+------------------------------------------------------------------+
 bool PassesEnvironmentFilters(string &block_reason)
 {
@@ -2654,7 +2653,7 @@ bool PassesEnvironmentFilters(string &block_reason)
       {
          if(dt.hour < InpSessionStartHour || dt.hour > InpSessionEndHour)
          {
-            block_reason = "OUTSIDE GOLD SESSION";
+            block_reason = "OUTSIDE TRADING SESSION";
             return false;
          }
       }
@@ -2662,7 +2661,7 @@ bool PassesEnvironmentFilters(string &block_reason)
       {
          if(dt.hour < InpSessionStartHour && dt.hour > InpSessionEndHour)
          {
-            block_reason = "OUTSIDE GOLD SESSION";
+            block_reason = "OUTSIDE TRADING SESSION";
             return false;
          }
       }
@@ -2689,7 +2688,7 @@ bool PassesEnvironmentFilters(string &block_reason)
       return false;
    }
 
-   if(g_micro.spread_zscore > 3.2)
+   if(g_micro.spread_zscore > 3.5)
    {
       block_reason = StringFormat("SPREAD SPIKE Z=%.1f", g_micro.spread_zscore);
       return false;
@@ -2719,8 +2718,9 @@ int OnInit()
    g_panel.Init(InpPanelX, InpPanelY);
    g_panel.Update(g_micro, g_mtf, g_risk, g_stats, g_exec);
 
-   PrintFormat("[MIDAS VX V4.0 UNLIMITED] Initialized on %s | Mode=%s | Risk=%.2f%% | MaxTranches=%d",
-               _Symbol, RiskModeName(g_cfg.risk_mode), g_cfg.risk_pct, InpMaxTranchesPerSignal);
+   PrintFormat("[MIDAS VX V3.5] Initialized on %s | Mode=%s | BaseRisk=%.2f%% | ATH ReLev=[%.2f..%.2f]xRec=[%.2f..%.2f]",
+               _Symbol, RiskModeName(g_cfg.risk_mode), g_cfg.risk_pct,
+               InpReLeverageBase, InpReLeverageMax, InpRecoveryBoostBase, InpRecoveryBoostMax);
 
    return INIT_SUCCEEDED;
 }
@@ -2778,7 +2778,7 @@ void OnTick()
    bool mtf_ready = g_mtf.Update();
    if(!mtf_ready)
    {
-      g_cfg.SetStatus("LOADING XAUUSD MTF BARS...", true);
+      g_cfg.SetStatus("LOADING MTF BARS...", true);
       g_panel.Update(g_micro, g_mtf, g_risk, g_stats, g_exec);
       return;
    }
@@ -2800,13 +2800,6 @@ void OnTick()
       return;
    }
 
-   if(g_mtf.current_regime == REGIME_CHOPPY_LOW_EDGE)
-   {
-      g_cfg.SetStatus("CHOP SHIELD ACTIVE (LOW ADX/ATR)", false);
-      g_panel.Update(g_micro, g_mtf, g_risk, g_stats, g_exec);
-      return;
-   }
-
    datetime bar_m1   = iTime(_Symbol, PERIOD_M1, 0);
    datetime now      = TimeCurrent();
    string   wait_msg = "";
@@ -2820,7 +2813,7 @@ void OnTick()
    SSignalCandidate best = g_scorer.EvaluateBestOpportunity(g_micro, g_mtf, g_stats);
    if(!best.valid)
    {
-      g_cfg.SetStatus("SCANNING XAUUSD (NO +EV SETUP)", false);
+      g_cfg.SetStatus("SCANNING (NO +EV SETUP)", false);
       g_panel.Update(g_micro, g_mtf, g_risk, g_stats, g_exec);
       return;
    }
@@ -2931,7 +2924,7 @@ double OnTester()
    double pf         = TesterStatistics(STAT_PROFIT_FACTOR);
    double trades     = TesterStatistics(STAT_TRADES);
 
-   if(net_profit <= 0.0 || trades < 100.0 || max_dd_pct >= 35.0)
+   if(net_profit <= 0.0 || trades < 250.0 || max_dd_pct >= 40.0)
       return 0.0;
 
    double initial_dep = TesterStatistics(STAT_INITIAL_DEPOSIT);
@@ -2939,8 +2932,8 @@ double OnTester()
 
    double return_pct   = (net_profit / initial_dep) * 100.0;
    double calmar_proxy = return_pct / MathMax(1.0, max_dd_pct);
-   double trade_factor = MathSqrt(MathMin(trades, 2500.0));
+   double trade_factor = MathSqrt(MathMin(trades, 10000.0));
 
-   return calmar_proxy * MathMin(pf, 4.0) * trade_factor;
+   return calmar_proxy * MathMin(pf, 3.5) * trade_factor;
 }
 //+------------------------------------------------------------------+
