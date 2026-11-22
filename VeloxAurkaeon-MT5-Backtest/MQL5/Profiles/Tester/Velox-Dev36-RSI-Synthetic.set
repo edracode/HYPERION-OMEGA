@@ -1,0 +1,5 @@
+InpSource=1
+InpPolicy=2
+InpCsv=rsi21_SYNTHETIC_replay.csv
+InpConfirmHistoricalCosts=true
+InpReportPrefix=velox_rsi_synthetic

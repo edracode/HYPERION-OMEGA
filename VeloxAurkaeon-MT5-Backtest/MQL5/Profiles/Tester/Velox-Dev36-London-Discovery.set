@@ -1,0 +1,4 @@
+InpSource=2
+InpLondonAllInExtraPips=0.40
+InpLondonHoldoutFromUTC=2006.11.22 00:00:00
+InpReportPrefix=velox_london_mt5_ticks
