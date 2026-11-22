@@ -51,3 +51,5 @@ python tools/verify_parity.py /path/to/veloxaurkaeon
 ```
 
 419 tes Python Dev36 lulus. Uji pembanding pada fixture menghasilkan 1.533 sinyal serta 824 perdagangan tertutup yang cocok. Perbandingan hasil tersebut mencakup ledger kebijakan lab dan quant, serta sinyal EMA dan Donchian. Kompilasi MetaEditor dan pengujian terminal dicatat terpisah.
+
+Build MetaEditor untuk kode EA pada commit `29ea0cce44aa162a37da900e58b5d42c1dd61606` selesai dengan **0 error dan 0 warning**, X64 Regular. SHA-256 `VeloxAurkaeonBacktest.ex5` adalah `247de2f9cb108fbca94c4367131ed25aeb46ebed37972f42c1c6b1101f230bfa`. Lihat [hasil build](https://github.com/edracode/HYPERION-OMEGA/actions/runs/45003641855). Data historis 20 tahun perlu dimuat pada terminal yang dipakai untuk pengujian.
