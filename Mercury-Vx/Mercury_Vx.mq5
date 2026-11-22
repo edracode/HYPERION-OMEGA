@@ -1,6 +1,6 @@
 #property strict
-#property version     "1.30"
-#property description "Mercury Vx | MT5 tick and minute scalper"
+#property version     "1.40"
+#property description "Mercury Vx | MT5 scalper and higher-timeframe research"
 #include <Trade/Trade.mqh>
 
 enum MercuryExecution
@@ -15,7 +15,19 @@ enum MercurySignal
    AUTO_BY_SYMBOL = 0,
    LEGACY_MICRO = 1,
    XAU_MEAN_REVERSION = 2,
-   BTC_WICK_RECLAIM = 3
+   BTC_WICK_RECLAIM = 3,
+   RESEARCH_BY_SYMBOL = 4,
+   RESEARCH_CUSTOM = 5
+  };
+
+enum MercuryResearchPattern
+  {
+   RANGE_BREAKOUT = 0,
+   TREND_PULLBACK = 1,
+   WICK_REVERSAL = 2,
+   TREND_CONTINUATION = 3,
+   EXHAUSTION_REVERSAL = 4,
+   COMPRESSION_BREAKOUT = 5
   };
 
 enum MercuryExitPolicy
@@ -45,11 +57,20 @@ input double MaxSpreadToAtr = 0.25;
 input double CommissionPerLotRoundTrip = 0.0; // Account currency.
 
 input group "Signal"
-input MercurySignal SignalModel = AUTO_BY_SYMBOL;
+input MercurySignal SignalModel = RESEARCH_BY_SYMBOL;
 input double MinimumSignal = 0.32;
 input double MinimumMicroSignal = 0.13;
 input double MinimumTrendAlignment = 0.15; // Set to 0 to use the previous directional filter.
 input double OpposingTrendLimit = 0.20;
+
+input group "Higher-timeframe research"
+input ENUM_TIMEFRAMES ResearchTimeframe = PERIOD_M15; // Custom profile.
+input MercuryResearchPattern ResearchPattern = COMPRESSION_BREAKOUT; // Custom profile.
+input int ResearchLookback = 18; // Custom profile.
+input bool ResearchLongOnly = true; // Custom profile.
+input double ResearchStopATR = 1.50; // Custom profile.
+input double ResearchRewardRisk = 3.0; // Custom profile.
+input double ResearchRiskPct = 0.75; // Both research profiles.
 
 input group "Backtest report"
 input int MinimumReportTrades = 100;
@@ -93,6 +114,7 @@ struct EntryDiagnostics
    int spread;
    int contract;
    int sizeOrMargin;
+   int minLot;
    int equityFloor;
    int rejected;
    int accepted;
@@ -143,6 +165,16 @@ MercurySignal signalInUse = LEGACY_MICRO;
 int positionMaxSeconds = 0;
 double entryStopMultiple = 0.0;
 double entryMaxSpreadToRisk = 0.0;
+double entryRewardRisk = 3.0;
+double activeRiskPct = 0.0;
+int activeCooldown = 0;
+bool researchMode = false;
+ENUM_TIMEFRAMES activeResearchTimeframe = PERIOD_M15;
+MercuryResearchPattern activeResearchPattern = COMPRESSION_BREAKOUT;
+int activeResearchLookback = 18;
+bool activeResearchLongOnly = true;
+datetime seenResearchBar = 0;
+int researchBarsObserved = 0;
 datetime seenMinute = 0;
 long nextDecision = 0;
 long nextEntry = 0;
@@ -359,10 +391,11 @@ int ChooseDirection(const double micro, string &setup)
 void ConfigureSignal()
   {
    signalInUse = SignalModel;
+   researchMode = SignalModel == RESEARCH_BY_SYMBOL || SignalModel == RESEARCH_CUSTOM;
+   const string base = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
+   const string quote = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
    if(signalInUse == AUTO_BY_SYMBOL)
      {
-      const string base = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
-      const string quote = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
       if(base == "XAU" && quote == "USD")
          signalInUse = XAU_MEAN_REVERSION;
       else if(base == "BTC" && quote == "USD")
@@ -373,7 +406,45 @@ void ConfigureSignal()
    positionMaxSeconds = MaxHoldSeconds;
    entryStopMultiple = StopAtrMultiple;
    entryMaxSpreadToRisk = MaxSpreadToRisk;
-   if(signalInUse == XAU_MEAN_REVERSION)
+   entryRewardRisk = RewardToRisk;
+   activeRiskPct = RiskPerTradePct;
+   activeCooldown = CooldownSeconds;
+   if(researchMode)
+     {
+      positionMaxSeconds = 48 * 60 * 60;
+      entryMaxSpreadToRisk = 0.15;
+      activeRiskPct = ResearchRiskPct;
+      activeCooldown = 60;
+      activeResearchTimeframe = ResearchTimeframe;
+      activeResearchPattern = ResearchPattern;
+      activeResearchLookback = ResearchLookback;
+      activeResearchLongOnly = ResearchLongOnly;
+      entryStopMultiple = ResearchStopATR;
+      entryRewardRisk = ResearchRewardRisk;
+      if(signalInUse == RESEARCH_BY_SYMBOL && base == "XAU" && quote == "USD")
+        {
+         activeResearchTimeframe = PERIOD_M15;
+         activeResearchPattern = COMPRESSION_BREAKOUT;
+         activeResearchLookback = 18;
+         activeResearchLongOnly = true;
+         entryStopMultiple = 1.50;
+         entryRewardRisk = 3.0;
+        }
+      else if(signalInUse == RESEARCH_BY_SYMBOL && base == "BTC" && quote == "USD")
+        {
+         activeResearchTimeframe = PERIOD_H1;
+         activeResearchPattern = COMPRESSION_BREAKOUT;
+         activeResearchLookback = 32;
+         activeResearchLongOnly = false;
+         entryStopMultiple = 1.00;
+         entryRewardRisk = 3.0;
+        }
+      else
+         signalInUse = RESEARCH_CUSTOM;
+      seenResearchBar = 0;
+      researchBarsObserved = 0;
+     }
+   else if(signalInUse == XAU_MEAN_REVERSION)
      {
       positionMaxSeconds = 720;
       entryStopMultiple = 1.00;
@@ -592,7 +663,7 @@ double GridPrice(const long ticks)
 
 double TargetPrice(const int direction, const double entry, const double stop)
   {
-   const double theoretical = entry + direction * RewardToRisk * MathAbs(entry - stop);
+   const double theoretical = entry + direction * entryRewardRisk * MathAbs(entry - stop);
    const double ticks = theoretical / tickSize;
    return GridPrice(direction > 0 ? (long)MathCeil(ticks - 1e-8) : (long)MathFloor(ticks + 1e-8));
   }
@@ -617,18 +688,20 @@ double RiskBudget(const double equity)
   {
    const double dailyFloor = dayStartEquity * (1.0 - DailyLossLimitPct / 100.0);
    const double remainingRisk = equity - MathMax(dailyFloor, DrawdownFloor());
-   return MathMin(equity * RiskPerTradePct / 100.0, remainingRisk);
+   return MathMin(equity * activeRiskPct / 100.0, remainingRisk);
   }
 
-double OrderVolume(const int direction, const double entry, const double stop)
+double OrderVolume(const int direction, const double entry, const double stop, const double spread)
   {
    const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    const double riskBudget = RiskBudget(equity) * SizingReserve;
    double minimumRisk = 0.0;
-   if(!RiskCash(direction, lotMin, entry, stop, minimumRisk))
+   const double sizingStop = researchMode ? stop - direction * 0.50 * spread : stop;
+   if(sizingStop <= 0.0 || !RiskCash(direction, lotMin, entry, sizingStop, minimumRisk))
       return 0.0;
    if(minimumRisk > riskBudget)
      {
+      ++diagnostics.minLot;
       const double floor = DrawdownFloor();
       if(floor > 0.0 && minimumRisk > SizingReserve * (equity - floor))
          ++diagnostics.equityFloor;
@@ -769,7 +842,7 @@ bool ManagePosition(const MqlTick &tick, const long second)
 
    if(!ownPosition && observedPosition != 0)
      {
-      nextEntry = (long)MathMax((double)nextEntry, (double)(second + CooldownSeconds));
+      nextEntry = (long)MathMax((double)nextEntry, (double)(second + activeCooldown));
       observedPosition = 0;
       checkedPosition = 0;
      }
@@ -819,7 +892,7 @@ void Enter(const int direction, const MqlTick &tick, const long second, const st
       ++diagnostics.contract;
       return;
      }
-   const double volume = OrderVolume(direction, entry, stop);
+   const double volume = OrderVolume(direction, entry, stop, spread);
    if(volume < lotMin)
      {
       ++diagnostics.sizeOrMargin;
@@ -835,7 +908,7 @@ void Enter(const int direction, const MqlTick &tick, const long second, const st
       return;
      }
 
-   nextEntry = second + (int)MathMax(2, CooldownSeconds);
+   nextEntry = second + (int)MathMax(2, activeCooldown);
    const string comment = "Mercury Vx " + setup;
    if(direction > 0)
       trade.Buy(volume, _Symbol, entry, stop, take, comment);
@@ -870,6 +943,11 @@ bool InputsValid()
           MinimumMicroSignal > 0.0 && MinimumMicroSignal <= 1.0 &&
           MinimumTrendAlignment >= 0.0 && MinimumTrendAlignment <= 1.0 &&
           OpposingTrendLimit >= 0.0 && OpposingTrendLimit <= 1.0 &&
+          ResearchRiskPct > 0.0 && ResearchRiskPct <= 5.0 &&
+          (ResearchTimeframe == PERIOD_M5 || ResearchTimeframe == PERIOD_M15 ||
+           ResearchTimeframe == PERIOD_M30 || ResearchTimeframe == PERIOD_H1) &&
+          ResearchLookback >= 4 && ResearchLookback <= 32 &&
+          ResearchStopATR > 0.0 && ResearchRewardRisk >= 1.0 &&
           MinimumReportTrades >= 1 && MinimumReportDays >= 1;
   }
 
@@ -882,14 +960,17 @@ int OnInit()
       Print("Mercury Vx | invalid inputs");
       return INIT_PARAMETERS_INCORRECT;
      }
+   ConfigureSignal();
    if(!inTester)
      {
       const long accountMode = AccountInfoInteger(ACCOUNT_TRADE_MODE);
       const bool allowed = (ExecutionMode == ENABLE_DEMO && accountMode == ACCOUNT_TRADE_MODE_DEMO) ||
-                           (ExecutionMode == ENABLE_REAL && accountMode == ACCOUNT_TRADE_MODE_REAL);
+                           (!researchMode && ExecutionMode == ENABLE_REAL &&
+                            accountMode == ACCOUNT_TRADE_MODE_REAL);
       if(!allowed)
         {
-         Print("Mercury Vx | use Strategy Tester or select the matching account in ExecutionMode");
+         Print(researchMode ? "Mercury Vx | research profiles are available in Strategy Tester and demo" :
+               "Mercury Vx | use Strategy Tester or select the matching account in ExecutionMode");
          return INIT_FAILED;
         }
      }
@@ -967,7 +1048,6 @@ int OnInit()
    otherExitDeals = 0;
    acceptedTimeExits = 0;
    ArrayResize(testYears, 0);
-   ConfigureSignal();
    seenMinute = 0;
    activeYearIndex = -1;
    coverageDay = 0;
@@ -976,9 +1056,13 @@ int OnInit()
    firstEntryDeal = 0;
    lastExitDeal = 0;
    observedTickCount = 0;
-   PrintFormat("Mercury Vx 1.30 | %s | Signal=%s | ExitPolicy=%s | Hold=%d seconds | SL=%.2f ATR | Spread/SL<=%.2f",
+   PrintFormat("Mercury Vx 1.40 | %s | Signal=%s | ExitPolicy=%s | Hold=%d seconds | SL=%.2f ATR | Spread/SL<=%.2f",
                _Symbol, EnumToString(signalInUse), EnumToString(ExitPolicy), positionMaxSeconds,
                entryStopMultiple, entryMaxSpreadToRisk);
+   if(researchMode)
+      PrintFormat("Mercury Vx | Research timeframe=%s pattern=%s lookback=%d longOnly=%s TP/SL=%.2f risk=%.2f%%",
+                  EnumToString(activeResearchTimeframe), EnumToString(activeResearchPattern),
+                  activeResearchLookback, activeResearchLongOnly ? "true" : "false", entryRewardRisk, activeRiskPct);
    return INIT_SUCCEEDED;
   }
 
@@ -1022,8 +1106,116 @@ void EvaluateBarEntry(const MqlTick &tick, const long second, const datetime min
    Enter(direction, tick, second, setup, atr);
   }
 
+int SwingSignal(const MqlRates &bars[], int family, int fast, int slow,
+                int longOnly, double atr)
+  {
+   if(atr <= 0.0)
+      return 0;
+   const double width = bars[0].high - bars[0].low;
+   if(width <= 0.0)
+      return 0;
+   const double loc = (bars[0].close-bars[0].low)/width;
+   const double body = (bars[0].close-bars[0].open)/atr;
+   const double trend = (bars[1].close-bars[slow].close)/(MathSqrt((double)slow)*atr);
+   double upper = bars[1].high, lower = bars[1].low, mean = 0.0;
+   for(int i=1; i<=fast; ++i)
+     {
+      upper = MathMax(upper,bars[i].high);
+      lower = MathMin(lower,bars[i].low);
+      mean += bars[i].close;
+     }
+   mean /= fast;
+   int direction = 0;
+   if(family==0)
+     {
+      if(trend>0.30 && bars[0].close>upper && body>0.35) direction=1;
+      if(trend<-0.30 && bars[0].close<lower && body<-0.35) direction=-1;
+     }
+   else if(family==1)
+     {
+      if(trend>0.55 && bars[1].close<mean && bars[0].close>mean && loc>0.65 && body>0.25) direction=1;
+      if(trend<-0.55 && bars[1].close>mean && bars[0].close<mean && loc<0.35 && body<-0.25) direction=-1;
+     }
+   else if(family==2)
+     {
+      if(trend>-0.65 && bars[0].low<lower && bars[0].close>lower && loc>0.73) direction=1;
+      if(trend<0.65 && bars[0].high>upper && bars[0].close<upper && loc<0.27) direction=-1;
+     }
+   else if(family==3)
+     {
+      const double upperRecent=MathMax(MathMax(bars[1].high,bars[2].high),bars[3].high);
+      const double lowerRecent=MathMin(MathMin(bars[1].low,bars[2].low),bars[3].low);
+      if(trend>0.95 && bars[0].close>upperRecent && body>0.70 && loc>0.72) direction=1;
+      if(trend<-0.95 && bars[0].close<lowerRecent && body<-0.70 && loc<0.28) direction=-1;
+     }
+   else if(family==4)
+     {
+      const double stretch=(bars[1].close-bars[fast].close)/(MathSqrt((double)fast)*atr);
+      if(stretch<-1.30 && body>0.35 && loc>0.65 && trend>-1.80) direction=1;
+      if(stretch>1.30 && body<-0.35 && loc<0.35 && trend<1.80) direction=-1;
+     }
+   else if(family==5)
+     {
+      if((upper-lower)<2.5*MathSqrt((double)fast)*atr)
+        {
+         if(bars[0].close>upper && body>0.60 && loc>0.72) direction=1;
+         if(bars[0].close<lower && body<-0.60 && loc<0.28) direction=-1;
+        }
+     }
+   return longOnly!=0 && direction<0 ? 0 : direction;
+  }
+
+void EvaluateResearchEntry(const MqlTick &tick, const long second)
+  {
+   const int span = PeriodSeconds(activeResearchTimeframe);
+   const datetime open = (datetime)((long)tick.time / span * span);
+   const bool newResearchBar = open != seenResearchBar;
+   if(newResearchBar)
+     {
+      seenResearchBar = open;
+      ++researchBarsObserved;
+     }
+
+   if(ManagePosition(tick, second) || !newResearchBar || blockedToday ||
+      blockedByDrawdown || second < nextEntry || !InTradingSession(tick.time))
+      return;
+
+   const int slow = 4 * activeResearchLookback;
+   if(researchBarsObserved <= slow + 2)
+     {
+      ++diagnostics.history;
+      return;
+     }
+   MqlRates bars[];
+   ArraySetAsSeries(bars, true);
+   if(CopyRates(_Symbol, activeResearchTimeframe, 1, slow + 1, bars) != slow + 1 ||
+      bars[0].time != open - span)
+     {
+      ++diagnostics.history;
+      return;
+     }
+
+   const double atr = AverageTrueRange(bars);
+   if(!MathIsValidNumber(atr) || atr <= 0.0)
+     {
+      ++diagnostics.history;
+      return;
+     }
+   const int direction = SwingSignal(bars, (int)activeResearchPattern, activeResearchLookback,
+                                     slow, activeResearchLongOnly ? 1 : 0, atr);
+   if(direction != 0)
+      Enter(direction, tick, second, "HTF research", atr);
+   else
+      ++diagnostics.signal;
+  }
+
 void EvaluateEntry(const MqlTick &tick, const long second, const double mid)
   {
+   if(researchMode)
+     {
+      EvaluateResearchEntry(tick, second);
+      return;
+     }
    const datetime minute = (datetime)((long)tick.time / 60 * 60);
    const bool newMinute = minute != seenMinute;
    seenMinute = minute;
@@ -1257,7 +1449,8 @@ double OnTester()
    PrintFormat("Mercury Vx | Entry checks | History=%d TickWindow=%d Signal=%d Spread=%d Contract=%d SizeOrMargin=%d Rejected=%d Accepted=%d",
                diagnostics.history, diagnostics.tickWindow, diagnostics.signal, diagnostics.spread,
                diagnostics.contract, diagnostics.sizeOrMargin, diagnostics.rejected, diagnostics.accepted);
-   PrintFormat("Mercury Vx | Entry checks | MinLotAboveDrawdownBudget=%d", diagnostics.equityFloor);
+   PrintFormat("Mercury Vx | Entry checks | MinLotAboveRiskBudget=%d MinLotAboveDrawdownBudget=%d",
+               diagnostics.minLot, diagnostics.equityFloor);
    if(csv != INVALID_HANDLE)
       FileFlush(csv);
 

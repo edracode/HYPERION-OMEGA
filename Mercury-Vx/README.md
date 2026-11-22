@@ -1,77 +1,65 @@
-# Mercury Vx 1.30 — Riset backtest
+# Mercury Vx 1.40 — Riset MT5
 
-Build ini mengukur tiga target yang diminta. **Belum ada konfigurasi yang lolos.** Gunakan branch riset ini untuk membandingkan exit dan membaca hasil Strategy Tester. Pengaturan bawaan tetap `ExecutionMode = TESTER_ONLY`.
+Build ini menambahkan profil breakout setelah kompresi untuk **XAUUSDm M15** dan **BTCUSDm H1**. Kedua profil rugi pada replay utama dengan modal simulasi USD 1.000. Hasil emas membaik pada simulasi USD 10.000 di 2026 dan kembali rugi pada data 2024. Profil baru tersedia di Strategy Tester dan akun demo.
 
-## Hasil yang dilaporkan pengguna
+## Hasil di luar periode pemilihan
 
-Laporan BTCUSDm menunjukkan modal USD 1.000, 351 trade, 165 pemenang (47,01%), laba kotor USD 408,03, rugi kotor USD 485,49, dan hasil bersih −USD 77,46. Rasio laba rata-rata USD 2,47 terhadap besar rugi rata-rata USD 2,61 memberi risk:reward terealisasi sekitar **1:0,95**. History Quality tercatat 86%. Metrik itu menilai kelengkapan dan konsistensi data menit. [Definisi laporan MT5](https://www.metatrader5.com/en/terminal/help/algotrading/testing_report)
+Replay memeriksa 158.436.857 tick Bid/Ask dari [arsip publik Exness](https://www.exness.com/tick-history/) selama Juli–Oktober 2024 dan Januari–Oktober 2026. Modal awal tiap baris USD 1.000. Risk:reward terealisasi adalah perbandingan besar rugi rata-rata terhadap laba rata-rata setelah biaya simulasi.
 
-## Exit dan penilaian target
+| Simbol | Periode | Trade | Win rate | Laba bersih | Profit factor | Drawdown ekuitas | Risk:reward terealisasi |
+|---|---|---:|---:|---:|---:|---:|---:|
+| XAUUSDm | Jul–Okt 2024 | 102 | 26,47% | −USD 5,96 | 0,99 | 9,85% | 1:2,74 |
+| XAUUSDm | Jan–Jun 2026 | 4 | 0,00% | −USD 25,75 | 0,00 | 3,08% | — |
+| XAUUSDm | Jul–Okt 2026 | 2 | 50,00% | +USD 11,92 | 2,86 | 1,00% | 1:2,86 |
+| XAUUSDm | Jan–Okt 2026 | 6 | 16,67% | −USD 13,83 | 0,57 | 4,07% | 1:2,85 |
+| BTCUSDm | Jul–Okt 2024 | 81 | 25,93% | −USD 0,41 | 1,00 | 5,44% | 1:2,85 |
+| BTCUSDm | Jan–Jun 2026 | 60 | 20,00% | −USD 74,78 | 0,69 | 9,83% | 1:2,76 |
+| BTCUSDm | Jul–Okt 2026 | 74 | 29,73% | +USD 39,89 | 1,15 | 9,87% | 1:2,72 |
+| BTCUSDm | Jan–Okt 2026 | 61 | 19,67% | −USD 76,11 | 0,69 | 9,96% | 1:2,80 |
 
-- **`PROFILE_TIMED`** memakai SL, TP, dan batas waktu profil. Ini pengaturan bawaan untuk pembanding dengan v1.20.
-- **`BRACKETS_ONLY`** mematikan exit berbasis waktu. Posisi tetap memakai SL/TP. Batas rugi harian, batas drawdown, dan penutupan oleh tester pada akhir tes masih berlaku. Posisi bisa bertahan lebih lama dan melewati pergantian hari.
-- Jarak harga TP direncanakan **tiga kali** jarak SL dan disesuaikan setelah pengisian order. Spread, slippage, swap, komisi, pembulatan ukuran tick, dan exit oleh batas risiko bisa mengubah rasio uang yang akhirnya tercatat.
-- Journal mencatat **`Targets=PASS`** hanya jika win rate **≥75%**, rata-rata laba dibagi besar rata-rata rugi **≥3**, kenaikan ekuitas **≥50% pada setiap hari server yang memiliki tick data**, laba bersih positif, serta jumlah trade dan hari memenuhi minimum yang dipilih. Rasio baru dapat dihitung jika ada setidaknya satu trade untung dan satu trade rugi. Hari dengan tick tanpa trade tetap termasuk dalam pengukuran. Journal menampilkan hasil target dan statistik harian sekalipun `ExportDailyCsv=false`. Batas awal sampel adalah 100 trade dan 20 hari dengan tick.
-- Untuk membandingkan dua mode, jalankan dua tes dengan simbol, tanggal, tick, biaya, modal, dan pengaturan risiko yang sama. Pilih **`BRACKETS_ONLY`** di tab **Inputs** untuk tes kedua. Baca `Targets`, `Daily equity` dan `Exit deals` di **Journal**. [Statistik yang dipakai dari Strategy Tester](https://www.mql5.com/en/docs/constants/environment_state/Statistics)
+Tes Jan–Okt meneruskan ekuitas, posisi, dan batas drawdown sepanjang periode. Tes subperiode masing-masing mulai dari USD 1.000. Tidak ada hari yang mencapai 50% pada tes-tes ini. Hari terbaik pada tes Jan–Okt 2026 adalah **1,89%** untuk emas dan **1,92%** untuk Bitcoin.
 
-## Replay tick publik Exness
+### Pengaruh lot minimum pada emas
 
-Replay lokal memakai **134.240.231 tick** dari November 2025 sampai Oktober 2026, dengan modal awal USD 1.000 pada setiap tes, lot minimum dan langkah lot 0,01, risiko per trade 0,25%, batas rugi harian 2%, batas drawdown ekuitas 10%, serta leverage simulasi 1:100. Replay menggunakan Bid/Ask historis dengan tambahan biaya sensitivitas 25% dari spread masuk dan memperhitungkannya dalam estimasi ukuran lot. Swap, delay, dan komisi broker di luar biaya sensitivitas tersebut tidak dimodelkan. Hasil replay terpisah dari angka pada foto MT5. [Sumber tick Exness](https://www.exness.com/tick-history/)
+Pada Jan–Okt 2026, ada 666 peluang entri emas yang tertahan karena lot 0,01 memerlukan anggaran risiko di atas batas simulasi USD 1.000. Dengan parameter sinyal dan persentase risiko tetap, skenario ukuran akun memberi hasil berikut.
 
-| Simbol | Exit | Trade | Win rate | Risk:reward terealisasi | Laba bersih | Hari ≥50% |
+| Modal simulasi | Periode XAUUSDm | Trade | Win rate | Laba bersih | Profit factor | Drawdown ekuitas |
 |---|---|---:|---:|---:|---:|---:|
-| BTCUSDm | Batas waktu profil | 287 | 45,99% | 1:0,96 | −USD 34,09 | 0/363 |
-| BTCUSDm | Tanpa batas waktu | 235 | 20,43% | 1:2,77 | −USD 91,25 | 0/363 |
-| XAUUSDm | Batas waktu profil | 503 | 30,02% | 1:2,05 | −USD 78,44 | 0/310 |
-| XAUUSDm | Tanpa batas waktu | 180 | 18,33% | 1:2,87 | −USD 88,74 | 0/310 |
+| USD 10.000 | Jan–Okt 2026 | 71 | 33,80% | +USD 1.461,33 (+14,61%) | 1,49 | 9,96% |
+| USD 10.000 | Jan–Okt 2026, biaya stres lebih tinggi | 72 | 33,33% | +USD 1.418,80 (+14,19%) | 1,48 | 9,99% |
+| USD 10.000 | Jan–Okt 2024 | 40 | 20,00% | −USD 797,60 (−7,98%) | 0,61 | 9,99% |
 
-Sebanyak 18 konfigurasi baru dari tiga keluarga sinyal (breakout tren, pullback tren, dan breakout sesudah kompresi) ikut diuji. Pemilihan memakai November 2025–April 2026 dengan minimum 100 trade. Parameter terpilih lalu dibekukan untuk Mei–Oktober 2026 dan data terpisah Juli–Oktober 2024. Kandidat BTC terpilih rugi USD 96,31 pada Mei–Oktober 2026. Kandidat XAU terpilih menghasilkan USD 30,42 pada data pemilihan, memiliki nol transaksi pada Mei–Oktober 2026 dengan batas lot dan spread yang sama, serta rugi USD 96,93 pada data Juli–Oktober 2024. Tidak ada varian baru yang memenuhi tiga target. [Pengujian forward di MT5](https://www.metatrader5.com/en/automated-trading/strategy-tester)
+Pada skenario emas USD 10.000 sepanjang Jan–Okt 2026, risk:reward terealisasi **1:2,93**, kenaikan hari terbaik **6,15%**, dan **0/259** hari mencapai 50%. Simulasi USD 10.000 ditambahkan setelah melihat kendala ukuran lot pada tes dasar. Data Jan–Jun 2024 baru dimuat untuk memeriksa sensitivitas tersebut, dengan parameter sinyal dan modal simulasi sudah ditetapkan. Bitcoin masih rugi **USD 535,96 (−5,36%)** pada Jan–Okt 2026 dengan USD 10.000. Angka selengkapnya ada di [hasil_replay.csv](hasil_replay.csv).
 
-Bagian logika target, pengelompokan hari, exit profil, serta penyelarasan harga TP 1:3 lulus uji lokal. Build ini masih perlu dikompilasi dengan MetaEditor dan diuji di Strategy Tester MT5 untuk memverifikasi eksekusi native.
+### Metode dan batas model
 
-## Pasang dan uji 1–20 tahun
+- Penyaringan mencakup 864 konfigurasi per simbol dari enam keluarga sinyal pada M5, M15, M30, dan H1. Jan–Jun dan Jul–Des 2025 masing-masing harus memiliki ≥25 trade, laba bersih ≥USD 8, profit factor ≥1,08 dan drawdown ≤11%. Minimal separuh parameter tetangga dengan ≥15 trade per bagian juga harus untung di kedua bagian. Satu kandidat per simbol dikunci sebelum replay tick periode lain.
+- Bar dibangun dari Bid. Sinyal memakai bar yang sudah selesai. Entri memakai tick pertama pada bar berikutnya dan exit memakai sisi Bid/Ask sesuai arah posisi. Tiga file BTCUSDm dalam periode pengembangan berisi blok waktu yang tidak berurutan. Seluruh baris dengan harga valid diurutkan berdasarkan milidetik dan disertakan sebelum agregasi.
+- Replay menggunakan lot minimum dan langkah lot 0,01, leverage simulasi 1:100, risiko 0,75% per posisi sebelum cadangan ukuran lot, batas rugi ekuitas harian 2%, dan batas drawdown ekuitas 10%. Replay menambahkan biaya sebesar 0,5 × spread masuk di atas Bid/Ask historis. Tes stres memakai 1,0 × spread. Biaya inap dimodelkan sebesar 0,035 R per pergantian hari UTC. Biaya broker, margin historis, stop level, swap, dan delay di MT5 dapat berbeda dari asumsi ini. Gap harga dapat melampaui batas rugi.
+- Pengujian C++ memeriksa aturan sinyal yang sama dengan EA, konfigurasi, harga TP, dan penilaian target. File .mq5 masih perlu dikompilasi di MetaEditor. Replay lokal dan Strategy Tester memakai mesin eksekusi yang berbeda. [Dokumentasi testing MT5](https://www.metatrader5.com/en/terminal/help/algotrading/testing)
 
-1. Di MT5 klik **File → Open Data Folder**. Salin `Mercury_Vx.mq5` ke folder `MQL5/Experts` tempat versi lama dipasang, lalu timpa file lama. Buka di MetaEditor dan tekan **F7**. Kompilasi yang berhasil membuat ulang `Mercury_Vx.ex5`. [Dokumentasi kompilasi MQL5](https://www.mql5.com/en/docs/runtime)
-2. Buka **Strategy Tester** dengan **Ctrl+R**. Pilih **Mercury_Vx**, timeframe **M1**, **Optimization → Disabled**, dan mode **Every tick based on real ticks**. Mode visual bisa dimatikan agar tes panjang lebih mudah dijalankan. [Pengaturan Strategy Tester](https://www.metatrader5.com/en/terminal/help/algotrading/testing)
-3. Pilih simbol yang mau diuji, misalnya **XAUUSDm**, **BTCUSDm**, atau **EURUSDm** di Exness Standard. Jalankan tes terpisah untuk tiap simbol. Gunakan `ExecutionMode = TESTER_ONLY`, `SignalModel = AUTO_BY_SYMBOL`, `ExitPolicy = PROFILE_TIMED`, dan spesifikasi akun yang ingin disimulasikan. [Sufiks simbol Exness](https://get.exness.help/hc/en-us/articles/360014560220-Account-type-suffixes)
-4. Pada **Date → Custom period**, tentukan tanggal awal dan akhir. Contoh tes setahun untuk data yang dipakai dalam replay di bawah adalah **1 November 2025 → 1 November 2026**. Untuk emas, pilih rentang 5, 10, atau 20 tahun jika sumber Anda memiliki tick yang diperlukan. Bitcoin diluncurkan pada 2009 dan perdagangan awalnya pada 2010, sehingga 20 tahun tick BTC aktual belum mungkin pada 2026. [Tanggal custom di MT5](https://www.metatrader5.com/en/terminal/help/algotrading/testing) · [Sejarah Bitcoin dari CME Group](https://www.cmegroup.com/articles/2025/celebrating-bitcoins-16th-birthday-a-look-at-achievements-in-the-crypto-space.html)
-5. Klik **Start**. Di **Journal**, periksa `Mercury Vx 1.30` dan baris `Coverage`. Bandingkan `FirstTick` dan `LastTick` dengan tanggal yang dipilih, lalu lihat `FirstEntry` dan `LastExit`. MT5 juga menampilkan **History Quality** dalam laporan Backtest. MT5 bisa menghasilkan tick untuk bar yang riwayat tick aslinya kosong. [Cakupan dan data tester](https://www.metatrader5.com/en/terminal/help/algotrading/test_preparation) · [Tick asli dan sintetis](https://www.metatrader5.com/en/terminal/help/algotrading/tick_generation)
+## Pasang dan backtest 1–20 tahun
 
-## Saat grafik perdagangan berakhir lebih awal
+1. Ekstrak `Mercury_Vx_MT5.zip`. Di MT5 klik **File → Open Data Folder**. Salin `Mercury_Vx.mq5` ke `MQL5/Experts/Advisors` jika versi lama ada di sana. Buka file di MetaEditor lalu tekan **F7** agar `Mercury_Vx.ex5` dibuat. [Kompilasi MQL5](https://www.mql5.com/en/docs/runtime)
+2. Tekan **Ctrl+R**. Pilih **Mercury_Vx** dan simbol **XAUUSDm** atau **BTCUSDm**. Setel **Optimization → Disabled**, model **Every tick based on real ticks**, dan matikan visualisasi untuk tes panjang. Gunakan timeframe Tester **M15** untuk XAUUSDm atau **H1** untuk BTCUSDm. [Model tick MT5](https://www.metatrader5.com/en/terminal/help/algotrading/tick_generation)
+3. Pada tab **Inputs**, gunakan **`ExecutionMode = TESTER_ONLY`**, **`SignalModel = RESEARCH_BY_SYMBOL`**, dan **`ExitPolicy = PROFILE_TIMED`**. Untuk simbol lain, gunakan **`RESEARCH_CUSTOM`** dengan timeframe M5, M15, M30, atau H1. Profil membaca spesifikasi simbol broker. Hasil pada pair lain belum diukur dalam riset ini.
+4. Pilih **Date → Custom period**. Contoh tes setahun **1 November 2025–1 November 2026**. Rentang 5, 10, atau 20 tahun bergantung pada riwayat simbol di broker atau impor Anda. Bitcoin diluncurkan pada 2009 dan perdagangan awalnya pada 2010. [Strategy Tester MT5](https://www.metatrader5.com/en/terminal/help/algotrading/testing) · [Riwayat awal Bitcoin](https://www.cmegroup.com/articles/2025/celebrating-bitcoins-16th-birthday-a-look-at-achievements-in-the-crypto-space.html)
+5. Klik **Start**. Di **Journal**, cari `Mercury Vx 1.40`, lalu `Coverage`, `Targets`, `Daily equity` dan `MinLotAboveRiskBudget`. Bandingkan `FirstTick` dan `LastTick` dengan tanggal yang diminta. `Targets=PASS` memerlukan laba bersih positif, minimal 100 trade dan 20 hari dengan tick pada input bawaan, win rate ≥75%, risk:reward terealisasi ≥1:3, dan kenaikan ekuitas ≥50% pada setiap hari yang memiliki tick. [Laporan MT5](https://www.metatrader5.com/en/terminal/help/algotrading/testing_report)
 
-Batas drawdown kumulatif bawaan **10%** bisa menghentikan entri sebelum tanggal akhir. Di dekat batas, lot minimum broker juga bisa lebih besar dari sisa anggaran risiko. Tanggal di ujung grafik harus dibaca bersama `LastTick` dan `LastExit` di Journal. `MinLotAboveDrawdownBudget` menunjukkan jumlah kandidat entri yang gagal pada batas tersebut.
+Profil XAU otomatis mencari breakout long setelah kompresi 18 bar M15 dengan SL 1,50 ATR. Profil BTC mencari breakout long atau short setelah kompresi 32 bar H1 dengan SL 1,00 ATR. TP bawaan direncanakan **1:3**, batas waktu posisi 48 jam, dan batas spread 15% dari jarak SL. Biaya dan penutupan sesuai batas waktu atau batas risiko dapat mengubah rasio terealisasi. **`AUTO_BY_SYMBOL`** memanggil profil M1 v1.30 untuk pembanding. **`BRACKETS_ONLY`** mematikan exit waktu.
 
-- `ExportAnnualCsv = true` menulis CSV dengan satu baris per tahun server yang memiliki tick. Kolomnya memuat cakupan tick, jumlah deal masuk/keluar, ekuitas awal/akhir, perubahan ekuitas, return, dan drawdown ekuitas di tahun itu. Tahun pertama dan terakhir bisa parsial. Deal dapat berjumlah lebih banyak daripada posisi jika ada pengisian parsial.
-- `ExportDailyCsv = false` adalah bawaan. Batas rugi harian tetap dihitung sebagai bagian dari pengendalian risiko.
-- Pada **Strategy Tester**, jalankan pembanding dengan `MaxEquityDrawdownPct = 0` jika Anda ingin mengukur sinyal tanpa penghentian drawdown kumulatif. Batas risiko per posisi, rugi harian, dan lot minimum tetap berlaku. Jika ekuitas menyusut, batas lot minimum masih bisa mengurangi aktivitas. Simpan hasil tes dengan batas 10% dan 0% secara terpisah.
+`ExportAnnualCsv = true` menulis statistik tiap tahun server yang memiliki tick. `ExportDailyCsv = true` menambahkan statistik harian. Folder output dicetak di Journal. Jika muncul pesan `cannot generate history data, check disk space`, cek ruang bebas drive data MT5 dan pastikan riwayat tick tersedia untuk tanggal tersebut.
 
-Lokasi laporan dicetak di Journal dan biasanya berada di **MetaQuotes → Terminal → Common → Files**.
+## Impor riwayat
 
-## Jika server belum menyediakan tick yang dibutuhkan
+Gunakan [arsip Exness](https://www.exness.com/tick-history/) atau sumber Bid/Ask yang sesuai. Cakupan arsip publik bisa berbeda dari server akun Anda. Dokumentasi data Dukascopy mencantumkan tick XAU/USD sejak Mei 2003. Feed serta biaya eksekusi antar sumber dapat berbeda. [Cakupan XAU/USD Dukascopy](https://www.dukascopy-node.app/instrument/xauusd)
 
-Cari Bid/Ask historis dari sumber yang sesuai. Untuk replay setahun ini, file bulanan tersedia di arsip publik Exness. Cakupan di arsip publik dapat berbeda dari server akun Anda. [Arsip tick publik Exness](https://www.exness.com/tick-history/) · [Penjelasan sumber riwayat tick Exness](https://get.exness.help/hc/id/articles/360021547851-Riwayat-tick)
-
-1. Di **Market Watch → Symbols → Create Custom Symbol**, buat simbol dengan nama unik seperti `XAUUSDm_HIST`. Salin spesifikasi dari simbol broker yang sesuai. Cocokkan **Digits**, ukuran tick, kontrak, lot minimum, langkah lot, mata uang, margin, dan sesi trading sebelum impor. [Custom Symbol MT5](https://www.metatrader5.com/en/terminal/help/trading_advanced/custom_instruments)
-2. Untuk arsip Exness, jalankan konverter yang disertakan dari folder hasil ekstrak dengan Python 3. Contoh untuk emas dengan 3 digit:
+1. Buka **Market Watch → Symbols → Create Custom Symbol**. Salin digit, ukuran tick, kontrak, lot, margin, dan sesi dari simbol asal. Beri nama seperti `XAUUSDm_HIST`.
+2. Dari folder hasil ekstrak, jalankan konverter dengan Python 3. Contoh untuk emas dengan tiga digit.
 
    ```powershell
    py .\convert_ticks_mt5.py .\Exness_XAUUSDm_2026_10.zip --digits 3
    ```
 
-   Untuk BTC yang dikutip dengan 2 digit, gunakan `--digits 2`. Cocokkan angka dengan spesifikasi simbol Anda. Konverter menghasilkan file `_ticks.csv` dan `_m1.csv` dengan pemisah tab dalam folder `mt5_import`. Data teks mengikuti format impor MT5 dan waktunya tetap UTC. Untuk file sumber lain, sesuaikan data dengan format Bars dan Ticks di dokumentasi MT5. [Format impor harga MT5](https://www.metatrader5.com/en/terminal/help/trading_advanced/custom_instruments)
-3. Di **Symbols → Bars**, impor file `_m1.csv` sebagai M1. Di **Symbols → Ticks**, impor `_ticks.csv`. Pilih **Tab** sebagai pemisah dan lewati satu baris header jika diperlukan. Periksa pratinjau agar baris data pertama tampil dan gunakan **Shift = 0** bila riwayat serta sesi simbol Anda memakai UTC. Ulangi per bulan secara berurutan, kemudian pilih custom symbol itu di Strategy Tester. [Impor riwayat ke custom symbol](https://www.metatrader5.com/en/terminal/help/trading_advanced/custom_instruments)
-
-Untuk uji emas hingga 20 tahun, dokumentasi dukascopy-node mencantumkan tick XAU/USD sejak Mei 2003. Pilih **tick** dan **CSV**, unduh per bagian, lalu gunakan `py .\convert_ticks_mt5.py .\file.csv --symbol XAUUSD --digits 3` jika file memiliki kolom `timestamp`, `bidPrice`, dan `askPrice`. Periksa celah riwayat dan gunakan nama custom symbol seperti `XAUUSD_DUKA` agar sumber feed tercatat. Spread dan hasil dari feed ini dapat berbeda dari Exness. [Cakupan XAU/USD Dukascopy](https://www.dukascopy-node.app/instrument/xauusd) · [Unduh tick Bid/Ask](https://www.dukascopy-node.app/downloading-tick-data)
-
-## Profil sinyal dan risiko
-
-| Profil | Cara memilih | Keluar berbasis waktu |
-|---|---|---:|
-| `XAU_MEAN_REVERSION` | Otomatis untuk XAU/USD. Menilai jarak terhadap rata-rata M1 dan tanda awal pembalikan. | 12 menit |
-| `BTC_WICK_RECLAIM` | Otomatis untuk BTC/USD. Menilai penolakan harga setelah menembus range 48 bar M1. | 5 menit |
-| `LEGACY_MICRO` | Otomatis untuk simbol lain seperti EURUSD atau dipilih manual untuk membandingkan v1.10. Menggunakan RSI, ATR, momentum tick, dan model indikator versi sebelumnya. | 3 menit secara bawaan |
-
-`AUTO_BY_SYMBOL` memakai mata uang dasar dan mata uang profit dari spesifikasi, jadi nama bersufiks maupun custom symbol yang spesifikasinya disalin dapat memakai profil yang sesuai. Profil emas dan BTC menilai bar M1 selesai dan memeriksa entri pada tick pertama bar berikutnya. Input `MaxHoldSeconds`, `StopAtrMultiple` dan `MaxSpreadToRisk` mengatur profil lama. Profil emas dan BTC memakai parameter tetap yang dibekukan untuk pengujian ini.
-
-SL/TP dirancang dengan jarak harga **1:3**. Spread, slippage, komisi, dan exit lebih awal bisa mengubah rasio hasil aktual. Risiko bawaan **0,25% per posisi**, batas rugi harian **2%**, dan batas drawdown **10%**. Lot dihitung dari spesifikasi simbol dan anggaran risiko yang tersisa. Eksekusi pada harga yang tersedia dapat membuat batas terlewati.
-
+   Sesuaikan `--digits` dengan simbol. Untuk CSV dengan kolom `timestamp`, `bidPrice` dan `askPrice`, sertakan `--symbol XAUUSD --digits 3`. Konverter menulis file `_m1.csv` dan `_ticks.csv` dalam folder `mt5_import`.
+3. Impor `_m1.csv` ke tab **Bars** sebagai M1 dan `_ticks.csv` ke tab **Ticks**. Gunakan pemisah **Tab** dan lewati satu baris header bila perlu. Gunakan **Shift 0** bila feed dan sesi simbol sama-sama UTC. Ulangi per bulan, lalu pilih custom symbol itu di Strategy Tester. [Custom Symbol MT5](https://www.metatrader5.com/en/terminal/help/trading_advanced/custom_instruments)
