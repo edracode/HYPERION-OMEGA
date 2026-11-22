@@ -1,6 +1,6 @@
 #property strict
-#property version     "1.51"
-#property description "Mercury Vx | Super Aggressive with optional time exits"
+#property version     "1.52"
+#property description "Mercury Vx | Controlled risk and Super Aggressive research"
 #include <Trade/Trade.mqh>
 
 enum MercuryExecution
@@ -19,7 +19,8 @@ enum MercurySignal
    RESEARCH_BY_SYMBOL = 4,
    RESEARCH_CUSTOM = 5,
    SUPER_AGGRESSIVE = 6,
-   SUPER_AGGRESSIVE_CUSTOM = 7
+   SUPER_AGGRESSIVE_CUSTOM = 7,
+   CONTROLLED_RISK = 8
   };
 
 enum MercuryResearchPattern
@@ -59,7 +60,7 @@ input double MaxSpreadToAtr = 0.25;
 input double CommissionPerLotRoundTrip = 0.0; // Account currency.
 
 input group "Signal"
-input MercurySignal SignalModel = SUPER_AGGRESSIVE;
+input MercurySignal SignalModel = CONTROLLED_RISK;
 input double MinimumSignal = 0.32;
 input double MinimumMicroSignal = 0.13;
 input double MinimumTrendAlignment = 0.15; // Set to 0 to use the previous directional filter.
@@ -87,6 +88,12 @@ input int AggressiveMaxHoldSeconds = 0; // Zero disables closing by position age
 input int AggressiveCloseBeforeMidnightMinutes = 0; // Zero disables clock-based session close.
 input double AggressiveSizingSpreadReserve = 0.0; // Fraction of spread added to the risk estimate.
 
+input group "Controlled risk (Strategy Tester)"
+input double ControlledRiskPct = 3.0;
+input double ControlledDailyLossPct = 8.0;
+input double ControlledDrawdownPct = 25.0;
+input double ControlledMaxSpreadToRisk = 0.20;
+
 input group "Backtest report"
 input int MinimumReportTrades = 100;
 input int MinimumReportDays = 20;
@@ -103,6 +110,7 @@ input bool ExportDailyCsv = true;
 
 const double RewardToRisk = 3.0;
 const double DailyTargetPct = 50.0;
+const double AnnualTargetPct = 85.0;
 const double WinRateTargetPct = 75.0;
 const double SizingReserve = 0.90;
 
@@ -154,6 +162,8 @@ EntryDiagnostics diagnostics;
 YearSummary testYears[];
 int activeYearIndex = -1;
 datetime coverageDay = 0;
+int coverageMonths = 0;
+int previousCoverageMonth = 0;
 datetime firstTestTick = 0;
 datetime lastTestTick = 0;
 datetime firstEntryDeal = 0;
@@ -187,6 +197,7 @@ double activeMaxDrawdownPct = 0.0;
 int activeCooldown = 0;
 bool researchMode = false;
 bool aggressiveMode = false;
+bool controlledRiskMode = false;
 ENUM_TIMEFRAMES activeResearchTimeframe = PERIOD_M15;
 MercuryResearchPattern activeResearchPattern = COMPRESSION_BREAKOUT;
 int activeResearchLookback = 18;
@@ -415,7 +426,9 @@ int ChooseDirection(const double micro, string &setup)
 void ConfigureSignal()
   {
    signalInUse = SignalModel;
-   aggressiveMode = SignalModel == SUPER_AGGRESSIVE || SignalModel == SUPER_AGGRESSIVE_CUSTOM;
+   controlledRiskMode = SignalModel == CONTROLLED_RISK;
+   aggressiveMode = controlledRiskMode || SignalModel == SUPER_AGGRESSIVE ||
+                    SignalModel == SUPER_AGGRESSIVE_CUSTOM;
    researchMode = aggressiveMode || SignalModel == RESEARCH_BY_SYMBOL || SignalModel == RESEARCH_CUSTOM;
    const string base = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
    const string quote = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
@@ -453,7 +466,22 @@ void ConfigureSignal()
       activeRiskPct = AggressiveRiskPct;
       entryStopMultiple = AggressiveStopATR;
       entryRewardRisk = AggressiveRewardRisk;
-      if(signalInUse == SUPER_AGGRESSIVE && base == "XAU" && dollarQuote)
+      if(controlledRiskMode)
+        {
+         activeRiskPct = ControlledRiskPct;
+         activeDailyLossPct = ControlledDailyLossPct;
+         activeMaxDrawdownPct = ControlledDrawdownPct;
+         entryMaxSpreadToRisk = ControlledMaxSpreadToRisk;
+         if(dollarQuote && (base == "BTC" || base == "XAU"))
+           {
+            activeResearchTimeframe = PERIOD_M5;
+            activeResearchPattern = base == "BTC" ? TREND_PULLBACK : TREND_CONTINUATION;
+            activeResearchLookback = 8;
+            entryStopMultiple = base == "BTC" ? 0.90 : 1.40;
+            entryRewardRisk = 2.0;
+           }
+        }
+      else if(signalInUse == SUPER_AGGRESSIVE && base == "XAU" && dollarQuote)
         {
          activeResearchTimeframe = PERIOD_M3;
          activeResearchPattern = EXHAUSTION_REVERSAL;
@@ -697,6 +725,12 @@ void ObserveTestTick(const datetime when, const double previousEquity, const dou
       MqlDateTime parts;
       if(!TimeToStruct(when, parts))
          return;
+      const int month = 12 * parts.year + parts.mon;
+      if(month != previousCoverageMonth)
+        {
+         ++coverageMonths;
+         previousCoverageMonth = month;
+        }
       activeYearIndex = FindYear(parts.year);
       if(activeYearIndex < 0)
         {
@@ -771,11 +805,21 @@ bool RiskCash(const int direction, const double volume, const double entry,
    return MathIsValidNumber(cash) && cash > 0.0;
   }
 
+double DrawdownRiskScale(const double equity, const double peak, const double limitPct)
+  {
+   if(peak <= 0.0 || limitPct <= 0.0)
+      return 1.0;
+   const double fraction = 100.0 * (1.0 - equity / peak) / limitPct;
+   const double progress = MathMin(1.0, MathMax(0.0, (fraction - 0.32) / 0.40));
+   return 1.0 - 0.75 * progress;
+  }
+
 double RiskBudget(const double equity)
   {
    const double dailyFloor = dayStartEquity * (1.0 - activeDailyLossPct / 100.0);
    const double remainingRisk = equity - MathMax(dailyFloor, DrawdownFloor());
-   return MathMin(equity * activeRiskPct / 100.0, remainingRisk);
+   const double scale = controlledRiskMode ? DrawdownRiskScale(equity, peakEquity, activeMaxDrawdownPct) : 1.0;
+   return MathMax(0.0, MathMin(equity * activeRiskPct * scale / 100.0, remainingRisk));
   }
 
 double OrderVolume(const int direction, const double entry, const double stop, const double spread)
@@ -1072,6 +1116,10 @@ bool InputsValid()
           AggressiveMaxHoldSeconds >= 0 &&
           AggressiveCloseBeforeMidnightMinutes >= 0 && AggressiveCloseBeforeMidnightMinutes <= 60 &&
           AggressiveSizingSpreadReserve >= 0.0 && AggressiveSizingSpreadReserve <= 1.0 &&
+          ControlledRiskPct > 0.0 && ControlledRiskPct <= 20.0 &&
+          ControlledDailyLossPct > 0.0 && ControlledDailyLossPct < 100.0 &&
+          ControlledDrawdownPct > 0.0 && ControlledDrawdownPct < 100.0 &&
+          ControlledMaxSpreadToRisk > 0.0 && ControlledMaxSpreadToRisk < 1.0 &&
           MinimumReportTrades >= 1 && MinimumReportDays >= 1;
   }
 
@@ -1186,12 +1234,14 @@ int OnInit()
    seenMinute = 0;
    activeYearIndex = -1;
    coverageDay = 0;
+   coverageMonths = 0;
+   previousCoverageMonth = 0;
    firstTestTick = 0;
    lastTestTick = 0;
    firstEntryDeal = 0;
    lastExitDeal = 0;
    observedTickCount = 0;
-   PrintFormat("Mercury Vx 1.51 | %s | Signal=%s | ExitPolicy=%s | Hold=%d seconds | SL=%.2f ATR | Spread/SL<=%.2f",
+   PrintFormat("Mercury Vx 1.52 | %s | Signal=%s | ExitPolicy=%s | Hold=%d seconds | SL=%.2f ATR | Spread/SL<=%.2f",
                _Symbol, EnumToString(signalInUse), EnumToString(ExitPolicy), positionMaxSeconds,
                entryStopMultiple, entryMaxSpreadToRisk);
    if(researchMode)
@@ -1208,6 +1258,9 @@ int OnInit()
       PrintFormat("Mercury Vx | Exit clocks | MaxHoldSeconds=%d | CloseBeforeMidnightMinutes=%d | Zero=disabled",
                   positionMaxSeconds, AggressiveCloseBeforeMidnightMinutes);
      }
+   if(controlledRiskMode)
+      PrintFormat("Mercury Vx | RiskThrottle | StartDrawdown=%.2f%% | QuarterRiskDrawdown=%.2f%%",
+                  0.32 * activeMaxDrawdownPct, 0.72 * activeMaxDrawdownPct);
    return INIT_SUCCEEDED;
   }
 
@@ -1535,6 +1588,24 @@ struct TargetAssessment
    bool pass;
   };
 
+int CalendarMonthDays(const int year, const int month)
+  {
+   if(month == 2)
+      return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) ? 29 : 28;
+   return month == 4 || month == 6 || month == 9 || month == 11 ? 30 : 31;
+  }
+
+bool HasFullAnnualCoverage(const datetime first, const datetime last, const int months)
+  {
+   if(first <= 0 || last <= first || months != 12)
+      return false;
+   MqlDateTime begin, end;
+   if(!TimeToStruct(first, begin) || !TimeToStruct(last, end))
+      return false;
+   return 12 * (end.year - begin.year) + end.mon - begin.mon == 11 &&
+          begin.day <= 4 && end.day >= CalendarMonthDays(end.year, end.mon) - 3;
+  }
+
 void AssessTargets(const double trades, const double wins, const double losses,
                    const double grossProfit, const double grossLoss, const double net,
                    const int observedDays, const int daysCheckedAtTarget,
@@ -1600,6 +1671,17 @@ double OnTester()
                   result, assessment.enoughSample ? "SUFFICIENT" : "INSUFFICIENT",
                   assessment.winRateMet ? "YES" : "NO", realized,
                   assessment.rewardRiskMet ? "YES" : "NO", assessment.profitable ? "YES" : "NO");
+   if(aggressiveMode && !inOptimization)
+     {
+      const bool annualCoverage = HasFullAnnualCoverage(firstTestTick, lastTestTick, coverageMonths);
+      const bool meetsAnnualTarget = annualCoverage && netPct >= AnnualTargetPct;
+      const string annualResult = annualCoverage ? (meetsAnnualTarget ? "PASS" : "FAIL") : "COVERAGE_UNVERIFIED";
+      string combinedResult = "FAIL";
+      if(assessment.pass)
+         combinedResult = annualCoverage ? annualResult : "COVERAGE_UNVERIFIED";
+      PrintFormat("Mercury Vx | ResearchGate=%s | Annual85=%s | ObservedMonths=%d | NetPct=%.2f%%",
+                  combinedResult, annualResult, coverageMonths, netPct);
+     }
    PrintFormat("Mercury Vx | Daily equity | DaysAt50Pct=%d/%d | AllDaysAt50Pct=%s | Best=%s | Worst=%s",
                daysAtTarget, daysObserved, assessment.dailyTargetMet ? "YES" : "NO", dailyBest, dailyWorst);
    PrintFormat("Mercury Vx | Daily outcomes | Positive=%d Negative=%d Flat=%d Invalid=%d ProfitLocks=%d",
