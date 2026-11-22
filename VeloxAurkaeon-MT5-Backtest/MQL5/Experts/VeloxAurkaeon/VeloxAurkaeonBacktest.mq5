@@ -1,16 +1,18 @@
 #property strict
-#property version "1.00"
+#property version "1.01"
 #property description "VeloxAurkaeon Dev36 historical simulator for MT5 Strategy Tester."
 #include "VeloxCore.mqh"
 #include "VeloxLondon.mqh"
 
 enum ReplaySource { MT5_BAR_PROXY, VELOX_OHLC_CSV, MT5_LONDON_TICKS };
+enum PaperNewsMode { DISCOVERY_ASSUME_CLEAR, ATTESTED_CLEAR, REQUIRE_NEWS_CLEARANCE };
+const string EA_VERSION = "1.01";
 
 input ReplaySource InpSource = MT5_BAR_PROXY;
 input VeloxPolicy InpPolicy = ExampleEMA;
 input string InpCsv = "";
 input string InpReportPrefix = "velox_dev36";
-input bool InpPaperNewsClear = false;
+input PaperNewsMode InpPaperNewsMode = DISCOVERY_ASSUME_CLEAR;
 input bool InpConfirmHistoricalCosts = false;
 input int InpServerUtcOffsetMinutes = 0;
 input int InpPaperHistory = 2000;
@@ -21,6 +23,7 @@ input int InpSignalMaxAgeSeconds = -1;
 input double InpInitialEquity = 10000.0;
 input double InpTickSize = 0.01;
 input double InpTickValue = 1.0;
+input bool InpUseTerminalQuoteGrid = true;
 input double InpPipSize = 0.1;
 input double InpMinLots = 0.01;
 input double InpMaxLots = 1.0;
@@ -51,6 +54,8 @@ datetime last_processed = 0;
 long first_open = 0, london_day = -1;
 int london_sessions = 0, london_pass = 0, london_holdout = 0;
 double london_total[3];
+double effective_tick_size = 0.0, effective_tick_value = 0.0;
+int effective_slippage_ticks = 0;
 
 bool IsPaper()
 {
@@ -124,6 +129,7 @@ int OnInit()
       Print("VeloxAurkaeon runs in a single Strategy Tester pass.");
       return INIT_FAILED;
    }
+   Print("VeloxAurkaeonBacktest v", EA_VERSION, " | symbol=", _Symbol, " | source=", EnumToString(InpSource));
    if(StringLen(InpReportPrefix) == 0 || StringFind(InpReportPrefix, "/") >= 0 ||
       StringFind(InpReportPrefix, "\\") >= 0 ||
       InpServerUtcOffsetMinutes < -840 || InpServerUtcOffsetMinutes > 840)
@@ -146,7 +152,10 @@ int OnInit()
    if(!ValidRisk() || !ValidContract() || InpPaperHistory < 31 || InpPaperHistory > 2000)
       return INIT_PARAMETERS_INCORRECT;
    if(InpSource == MT5_BAR_PROXY && !SymbolMatches("XAUUSD", "XAU", "USD"))
+   {
+      Print("Select an XAUUSD symbol in Strategy Tester Settings. Broker suffixes are supported. Selected: ", _Symbol);
       return INIT_PARAMETERS_INCORRECT;
+   }
    if(InpSource == VELOX_OHLC_CSV && (InpCsv == "" || !InpConfirmHistoricalCosts ||
       InpCsv == InpReportPrefix + "_trades.csv" || InpCsv == InpReportPrefix + "_summary.csv" ||
       InpCsv == InpReportPrefix + "_equity.csv" || InpCsv == InpReportPrefix + "_rejections.csv"))
@@ -154,9 +163,9 @@ int OnInit()
       Print("Set InpCsv and confirm the historical per-bar financing schedule.");
       return INIT_PARAMETERS_INCORRECT;
    }
-   if(IsPaper() && !InpPaperNewsClear)
+   if(IsPaper() && InpPaperNewsMode == REQUIRE_NEWS_CLEARANCE)
    {
-      Print("PAPER_ATTESTED mode requires explicit historical news clearance.");
+      Print("InpPaperNewsMode=REQUIRE_NEWS_CLEARANCE blocks this run. Select DISCOVERY_ASSUME_CLEAR for a discovery test.");
       return INIT_PARAMETERS_INCORRECT;
    }
    if(InpPolicy >= QuantTSMomentum &&
@@ -166,9 +175,24 @@ int OnInit()
    frame = PERIOD_H4;
    if(InpPolicy == ExampleEMA || InpPolicy == LabADX18Burst) frame = PERIOD_H1;
    if(InpPolicy == ExperimentDonchian) frame = PERIOD_D1;
+   effective_tick_size = InpTickSize;
+   effective_tick_value = InpTickValue;
+   effective_slippage_ticks = InpSlippageTicks;
+   if(InpSource == MT5_BAR_PROXY && InpUseTerminalQuoteGrid && _Point > 0 && _Point < InpTickSize)
+   {
+      // Broker quotes may use fractional ticks relative to the example contract.
+      // Keep cash per price unit and the requested price slippage unchanged.
+      const double subdivisions = InpTickSize / _Point;
+      if(MathAbs(subdivisions - MathRound(subdivisions)) < 1e-8)
+      {
+         effective_tick_size = _Point;
+         effective_tick_value = InpTickValue / subdivisions;
+         effective_slippage_ticks = (int)MathRound(InpSlippageTicks * subdivisions);
+      }
+   }
    Contract spec;
-   spec.tick_size = InpTickSize;
-   spec.tick_value = InpTickValue;
+   spec.tick_size = effective_tick_size;
+   spec.tick_value = effective_tick_value;
    spec.pip_size = InpPipSize;
    spec.lot_min = InpMinLots;
    spec.lot_max = InpMaxLots;
@@ -186,7 +210,7 @@ int OnInit()
    risk.max_open_risk = InpMaxOpenRisk;
    risk.margin_reserve = InpMarginReserve;
    risk.entry_lot_cap = InpEntryLotCap;
-   risk.slippage_ticks = InpSlippageTicks;
+   risk.slippage_ticks = effective_slippage_ticks;
    risk.delay_bars = InpDelayBars;
    risk.max_signal_age = InpSignalMaxAgeSeconds;
    risk.first_trade_bar = InpWarmupBars;
@@ -207,8 +231,14 @@ int OnInit()
    FileWrite(rejects_file, "bar_open_utc", "reason");
    FileWrite(equity_file, "bar_close_utc", "balance", "equity");
    Print("Velox Dev36 ", PolicyId(), ", outputs: ", TerminalInfoString(TERMINAL_COMMONDATA_PATH), "\\Files");
+   if(IsPaper() && InpPaperNewsMode == DISCOVERY_ASSUME_CLEAR)
+      Print("DISCOVERY_ASSUME_CLEAR: historical news is assumed clear. No calendar is loaded.");
    if(InpSource == MT5_BAR_PROXY)
+   {
       Print("BAR PROXY: MT5 bid OHLC plus a single bar spread, zero financing, fixed contract.");
+      PrintFormat("Effective quote grid %.10f; cash per lot/tick %.10f; slippage price %.10f",
+                  effective_tick_size, effective_tick_value, effective_slippage_ticks * effective_tick_size);
+   }
    return INIT_SUCCEEDED;
 }
 
@@ -391,11 +421,16 @@ void OnDeinit(const int reason)
       FileWrite(summary_file, "run_status", failed || book.BarCount() <= InpWarmupBars ? "FAILED" :
                 (InpSource == VELOX_OHLC_CSV && !csv_done ? "INCOMPLETE" : "UNVALIDATED"));
       FileWrite(summary_file, "upstream", "v0.4.0.dev36");
+      FileWrite(summary_file, "ea_version", EA_VERSION);
       FileWrite(summary_file, "policy", PolicyId());
+      FileWrite(summary_file, "news_mode", IsPaper() ? EnumToString(InpPaperNewsMode) : "NOT_APPLICABLE");
       FileWrite(summary_file, "source", EnumToString(InpSource));
       FileWrite(summary_file, "tester_symbol", _Symbol);
       FileWrite(summary_file, "symbol_scope", "XAUUSD");
       FileWrite(summary_file, "policy_period", EnumToString(frame));
+      FileWrite(summary_file, "effective_tick_size", DoubleToString(effective_tick_size, 10));
+      FileWrite(summary_file, "effective_tick_value", DoubleToString(effective_tick_value, 10));
+      FileWrite(summary_file, "slippage_price", DoubleToString(effective_slippage_ticks * effective_tick_size, 10));
       FileWrite(summary_file, "first_bar_open_utc", book.BarCount() > 0 ? ClockText(first_open) : "");
       FileWrite(summary_file, "last_bar_close_utc", book.BarCount() > 0 ? ClockText(book.LastClose()) : "");
       FileWrite(summary_file, "bars", book.BarCount());

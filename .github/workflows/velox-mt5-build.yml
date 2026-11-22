@@ -38,9 +38,13 @@ jobs:
           $source = Join-Path $env:GITHUB_WORKSPACE "VeloxAurkaeon-MT5-Backtest\MQL5\Experts\VeloxAurkaeon\VeloxAurkaeonBacktest.mq5"
           $output = [IO.Path]::ChangeExtension($source, ".ex5")
           $log = Join-Path $env:RUNNER_TEMP "velox-compile.log"
+          if (Test-Path $output) { Remove-Item -LiteralPath $output }
           Start-Process $env:VELOX_METAEDITOR -ArgumentList "/compile:`"$source`" /log:`"$log`"" -Wait
           if (Test-Path $log) { Get-Content $log }
           if (!(Test-Path $output)) { throw "MetaEditor produced no EX5" }
+          if (!(Test-Path $log) -or (Get-Content $log -Raw) -notmatch 'Result: 0 errors, 0 warnings') {
+            throw "MetaEditor did not report a clean compilation"
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
