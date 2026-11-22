@@ -1,6 +1,6 @@
 #property strict
-#property version     "1.40"
-#property description "Mercury Vx | MT5 scalper and higher-timeframe research"
+#property version     "1.50"
+#property description "Mercury Vx Super Aggressive | MT5 backtest research"
 #include <Trade/Trade.mqh>
 
 enum MercuryExecution
@@ -17,7 +17,9 @@ enum MercurySignal
    XAU_MEAN_REVERSION = 2,
    BTC_WICK_RECLAIM = 3,
    RESEARCH_BY_SYMBOL = 4,
-   RESEARCH_CUSTOM = 5
+   RESEARCH_CUSTOM = 5,
+   SUPER_AGGRESSIVE = 6,
+   SUPER_AGGRESSIVE_CUSTOM = 7
   };
 
 enum MercuryResearchPattern
@@ -57,7 +59,7 @@ input double MaxSpreadToAtr = 0.25;
 input double CommissionPerLotRoundTrip = 0.0; // Account currency.
 
 input group "Signal"
-input MercurySignal SignalModel = RESEARCH_BY_SYMBOL;
+input MercurySignal SignalModel = SUPER_AGGRESSIVE;
 input double MinimumSignal = 0.32;
 input double MinimumMicroSignal = 0.13;
 input double MinimumTrendAlignment = 0.15; // Set to 0 to use the previous directional filter.
@@ -72,11 +74,21 @@ input double ResearchStopATR = 1.50; // Custom profile.
 input double ResearchRewardRisk = 3.0; // Custom profile.
 input double ResearchRiskPct = 0.75; // Both research profiles.
 
+input group "Super Aggressive (Strategy Tester)"
+input ENUM_TIMEFRAMES AggressiveTimeframe = PERIOD_M1; // Custom profile.
+input MercuryResearchPattern AggressivePattern = TREND_PULLBACK; // Custom profile.
+input int AggressiveLookback = 8; // Custom profile.
+input double AggressiveStopATR = 1.40; // Custom profile.
+input double AggressiveRewardRisk = 1.35; // Custom profile.
+input double AggressiveRiskPct = 6.0; // Custom profile.
+input double AggressiveDailyLossPct = 25.0;
+input double AggressiveDrawdownPct = 50.0;
+
 input group "Backtest report"
 input int MinimumReportTrades = 100;
 input int MinimumReportDays = 20;
 input bool ExportAnnualCsv = true;
-input bool ExportDailyCsv = false;
+input bool ExportDailyCsv = true;
 
 #define FRAME_COUNT 4
 #define PERIOD_COUNT 128
@@ -90,6 +102,8 @@ const double RewardToRisk = 3.0;
 const double DailyTargetPct = 50.0;
 const double WinRateTargetPct = 75.0;
 const double SizingReserve = 0.90;
+const int AggressiveHoldSeconds = 180;
+const int AggressiveDayCutoff = 86400 - AggressiveHoldSeconds;
 
 struct FrameSignal
   {
@@ -167,8 +181,11 @@ double entryStopMultiple = 0.0;
 double entryMaxSpreadToRisk = 0.0;
 double entryRewardRisk = 3.0;
 double activeRiskPct = 0.0;
+double activeDailyLossPct = 0.0;
+double activeMaxDrawdownPct = 0.0;
 int activeCooldown = 0;
 bool researchMode = false;
+bool aggressiveMode = false;
 ENUM_TIMEFRAMES activeResearchTimeframe = PERIOD_M15;
 MercuryResearchPattern activeResearchPattern = COMPRESSION_BREAKOUT;
 int activeResearchLookback = 18;
@@ -188,6 +205,11 @@ ulong observedPosition = 0;
 int csv = INVALID_HANDLE;
 int daysObserved = 0;
 int daysAtTarget = 0;
+int positiveDays = 0;
+int negativeDays = 0;
+int flatDays = 0;
+int invalidDays = 0;
+int profitLocks = 0;
 double worstDayPct = 0.0;
 double bestDayPct = 0.0;
 bool hasDayReturn = false;
@@ -195,6 +217,7 @@ datetime activeDay = 0;
 double dayStartEquity = 0.0;
 double lastEquity = 0.0;
 bool blockedToday = false;
+bool profitLockedToday = false;
 double peakEquity = 0.0;
 bool blockedByDrawdown = false;
 int stopLossDeals = 0;
@@ -391,7 +414,8 @@ int ChooseDirection(const double micro, string &setup)
 void ConfigureSignal()
   {
    signalInUse = SignalModel;
-   researchMode = SignalModel == RESEARCH_BY_SYMBOL || SignalModel == RESEARCH_CUSTOM;
+   aggressiveMode = SignalModel == SUPER_AGGRESSIVE || SignalModel == SUPER_AGGRESSIVE_CUSTOM;
+   researchMode = aggressiveMode || SignalModel == RESEARCH_BY_SYMBOL || SignalModel == RESEARCH_CUSTOM;
    const string base = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
    const string quote = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
    if(signalInUse == AUTO_BY_SYMBOL)
@@ -408,8 +432,47 @@ void ConfigureSignal()
    entryMaxSpreadToRisk = MaxSpreadToRisk;
    entryRewardRisk = RewardToRisk;
    activeRiskPct = RiskPerTradePct;
+   activeDailyLossPct = DailyLossLimitPct;
+   activeMaxDrawdownPct = MaxEquityDrawdownPct;
    activeCooldown = CooldownSeconds;
-   if(researchMode)
+   seenResearchBar = 0;
+   researchBarsObserved = 0;
+   if(aggressiveMode)
+     {
+      positionMaxSeconds = AggressiveHoldSeconds;
+      entryMaxSpreadToRisk = 0.30;
+      activeCooldown = 30;
+      activeDailyLossPct = AggressiveDailyLossPct;
+      activeMaxDrawdownPct = AggressiveDrawdownPct;
+      activeResearchTimeframe = AggressiveTimeframe;
+      activeResearchPattern = AggressivePattern;
+      activeResearchLookback = AggressiveLookback;
+      activeResearchLongOnly = false;
+      activeRiskPct = AggressiveRiskPct;
+      entryStopMultiple = AggressiveStopATR;
+      entryRewardRisk = AggressiveRewardRisk;
+      if(signalInUse == SUPER_AGGRESSIVE && base == "XAU" && quote == "USD")
+        {
+         activeResearchTimeframe = PERIOD_M3;
+         activeResearchPattern = EXHAUSTION_REVERSAL;
+         activeResearchLookback = 16;
+         activeRiskPct = 2.0;
+         entryStopMultiple = 2.0;
+         entryRewardRisk = 1.35;
+        }
+      else if(signalInUse == SUPER_AGGRESSIVE && base == "BTC" && quote == "USD")
+        {
+         activeResearchTimeframe = PERIOD_M3;
+         activeResearchPattern = WICK_REVERSAL;
+         activeResearchLookback = 8;
+         activeRiskPct = 20.0;
+         entryStopMultiple = 0.80;
+         entryRewardRisk = 0.80;
+        }
+      else
+         signalInUse = SUPER_AGGRESSIVE_CUSTOM;
+     }
+   else if(researchMode)
      {
       positionMaxSeconds = 48 * 60 * 60;
       entryMaxSpreadToRisk = 0.15;
@@ -441,8 +504,6 @@ void ConfigureSignal()
         }
       else
          signalInUse = RESEARCH_CUSTOM;
-      seenResearchBar = 0;
-      researchBarsObserved = 0;
      }
    else if(signalInUse == XAU_MEAN_REVERSION)
      {
@@ -456,7 +517,7 @@ void ConfigureSignal()
       entryStopMultiple = 1.80;
       entryMaxSpreadToRisk = 0.10;
      }
-   if(ExitPolicy == BRACKETS_ONLY)
+   if(!aggressiveMode && ExitPolicy == BRACKETS_ONLY)
       positionMaxSeconds = 0;
   }
 
@@ -518,6 +579,11 @@ bool InTradingSession(const datetime when)
    return parts.hour >= SessionStartHour || parts.hour < SessionEndHour;
   }
 
+bool DailyEquityTargetReached(const double startingEquity, const double endingEquity)
+  {
+   return startingEquity > 0.0 && endingEquity >= startingEquity * (1.0 + DailyTargetPct / 100.0);
+  }
+
 void WriteDay(const double endingEquity)
   {
    if(!inTester || activeDay == 0)
@@ -525,13 +591,20 @@ void WriteDay(const double endingEquity)
    ++daysObserved;
    if(dayStartEquity <= 0.0)
      {
+      ++invalidDays;
       if(csv != INVALID_HANDLE)
          FileWrite(csv, TimeToString(activeDay, TIME_DATE), DoubleToString(dayStartEquity, 2),
                    DoubleToString(endingEquity, 2), "", "NO");
       return;
      }
    const double result = 100.0 * (endingEquity / dayStartEquity - 1.0);
-   const bool atTarget = endingEquity >= dayStartEquity * (1.0 + DailyTargetPct / 100.0);
+   if(result > 1e-8)
+      ++positiveDays;
+   else if(result < -1e-8)
+      ++negativeDays;
+   else
+      ++flatDays;
+   const bool atTarget = DailyEquityTargetReached(dayStartEquity, endingEquity);
    if(atTarget)
       ++daysAtTarget;
    if(!hasDayReturn || result < worstDayPct)
@@ -554,6 +627,7 @@ void UpdateDay(const datetime when)
       dayStartEquity = activeDay == 0 ? equity : lastEquity;
       activeDay = day;
       blockedToday = false;
+      profitLockedToday = false;
       if(!inTester)
         {
          dayKey = accountKey + "." + IntegerToString((long)day / 86400);
@@ -567,7 +641,7 @@ void UpdateDay(const datetime when)
      }
    lastEquity = equity;
    if(!blockedToday && dayStartEquity > 0.0 &&
-      equity <= dayStartEquity * (1.0 - DailyLossLimitPct / 100.0))
+      equity <= dayStartEquity * (1.0 - activeDailyLossPct / 100.0))
      {
       blockedToday = true;
       if(!inTester)
@@ -633,12 +707,12 @@ void ObserveTestTick(const datetime when, const double previousEquity, const dou
 
 double DrawdownFloor()
   {
-   return MaxEquityDrawdownPct > 0.0 ? peakEquity * (1.0 - MaxEquityDrawdownPct / 100.0) : 0.0;
+   return activeMaxDrawdownPct > 0.0 ? peakEquity * (1.0 - activeMaxDrawdownPct / 100.0) : 0.0;
   }
 
 void UpdateDrawdown(const double equity)
   {
-   if(MaxEquityDrawdownPct <= 0.0 || blockedByDrawdown)
+   if(activeMaxDrawdownPct <= 0.0 || blockedByDrawdown)
       return;
    if(equity > peakEquity)
      {
@@ -652,7 +726,7 @@ void UpdateDrawdown(const double equity)
       if(!inTester && GlobalVariableSet(peakKey, -peakEquity) != 0)
          GlobalVariablesFlush();
       PrintFormat("Mercury Vx | drawdown halt | peak=%.2f equity=%.2f configured=%.2f%%",
-                  peakEquity, equity, MaxEquityDrawdownPct);
+                  peakEquity, equity, activeMaxDrawdownPct);
      }
   }
 
@@ -686,7 +760,7 @@ bool RiskCash(const int direction, const double volume, const double entry,
 
 double RiskBudget(const double equity)
   {
-   const double dailyFloor = dayStartEquity * (1.0 - DailyLossLimitPct / 100.0);
+   const double dailyFloor = dayStartEquity * (1.0 - activeDailyLossPct / 100.0);
    const double remainingRisk = equity - MathMax(dailyFloor, DrawdownFloor());
    return MathMin(equity * activeRiskPct / 100.0, remainingRisk);
   }
@@ -707,7 +781,18 @@ double OrderVolume(const int direction, const double entry, const double stop, c
          ++diagnostics.equityFloor;
       return 0.0;
      }
-   const double raw = MathMin(lotMax, lotMin * riskBudget / minimumRisk);
+   double raw = MathMin(lotMax, lotMin * riskBudget / minimumRisk);
+   if(aggressiveMode)
+     {
+      const ENUM_ORDER_TYPE side = direction > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      double minimumMargin = 0.0;
+      if(!OrderCalcMargin(side, _Symbol, lotMin, entry, minimumMargin))
+         return 0.0;
+      if(minimumMargin > 0.0)
+         raw = MathMin(raw, lotMin * 0.80 * AccountInfoDouble(ACCOUNT_MARGIN_FREE) / minimumMargin);
+      if(raw < lotMin)
+         return 0.0;
+     }
    return NormalizeDouble(lotMin + MathFloor((raw - lotMin) / lotStep + 1e-8) * lotStep, 8);
   }
 
@@ -795,6 +880,11 @@ bool ManagePosition(const MqlTick &tick, const long second)
          ClosePosition(ticket, second, blockedToday ? "daily equity limit" : "missing protective order");
          continue;
         }
+      if(aggressiveMode && second % 86400 >= AggressiveDayCutoff)
+        {
+         ClosePosition(ticket, second, "end of server day");
+         continue;
+        }
       if(positionMaxSeconds > 0 && second - PositionGetInteger(POSITION_TIME) >= positionMaxSeconds)
         {
          ClosePosition(ticket, second, "time exit");
@@ -867,7 +957,7 @@ void Enter(const int direction, const MqlTick &tick, const long second, const st
       return;
      }
    const double spread = tick.ask - tick.bid;
-   if(spread > atr * MaxSpreadToAtr)
+   if(!aggressiveMode && spread > atr * MaxSpreadToAtr)
      {
       ++diagnostics.spread;
       return;
@@ -948,6 +1038,12 @@ bool InputsValid()
            ResearchTimeframe == PERIOD_M30 || ResearchTimeframe == PERIOD_H1) &&
           ResearchLookback >= 4 && ResearchLookback <= 32 &&
           ResearchStopATR > 0.0 && ResearchRewardRisk >= 1.0 &&
+          (AggressiveTimeframe == PERIOD_M1 || AggressiveTimeframe == PERIOD_M3) &&
+          AggressiveLookback >= 4 && AggressiveLookback <= 32 &&
+          AggressiveStopATR > 0.0 && AggressiveRewardRisk >= 0.10 &&
+          AggressiveRiskPct > 0.0 && AggressiveRiskPct <= 20.0 &&
+          AggressiveDailyLossPct > 0.0 && AggressiveDailyLossPct < 100.0 &&
+          AggressiveDrawdownPct > 0.0 && AggressiveDrawdownPct < 100.0 &&
           MinimumReportTrades >= 1 && MinimumReportDays >= 1;
   }
 
@@ -961,6 +1057,11 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
      }
    ConfigureSignal();
+   if(aggressiveMode && !inTester)
+     {
+      Print("Mercury Vx Super Aggressive | requires MT5 Strategy Tester");
+      return INIT_FAILED;
+     }
    if(!inTester)
      {
       const long accountMode = AccountInfoInteger(ACCOUNT_TRADE_MODE);
@@ -1018,7 +1119,7 @@ int OnInit()
         }
       peakKey = accountKey + ".peak." + IntegerToString((long)HashText(IntegerToString((long)MagicNumber)));
       double savedPeak = 0.0;
-      if(MaxEquityDrawdownPct > 0.0 && GlobalVariableGet(peakKey, savedPeak) && MathIsValidNumber(savedPeak))
+      if(activeMaxDrawdownPct > 0.0 && GlobalVariableGet(peakKey, savedPeak) && MathIsValidNumber(savedPeak))
         {
          peakEquity = MathAbs(savedPeak);
          blockedByDrawdown = savedPeak < 0.0;
@@ -1035,6 +1136,12 @@ int OnInit()
    activeDay = 0;
    daysObserved = 0;
    daysAtTarget = 0;
+   positiveDays = 0;
+   negativeDays = 0;
+   flatDays = 0;
+   invalidDays = 0;
+   profitLocks = 0;
+   profitLockedToday = false;
    worstDayPct = 0.0;
    bestDayPct = 0.0;
    hasDayReturn = false;
@@ -1056,13 +1163,16 @@ int OnInit()
    firstEntryDeal = 0;
    lastExitDeal = 0;
    observedTickCount = 0;
-   PrintFormat("Mercury Vx 1.40 | %s | Signal=%s | ExitPolicy=%s | Hold=%d seconds | SL=%.2f ATR | Spread/SL<=%.2f",
+   PrintFormat("Mercury Vx 1.50 | %s | Signal=%s | ExitPolicy=%s | Hold=%d seconds | SL=%.2f ATR | Spread/SL<=%.2f",
                _Symbol, EnumToString(signalInUse), EnumToString(ExitPolicy), positionMaxSeconds,
                entryStopMultiple, entryMaxSpreadToRisk);
    if(researchMode)
       PrintFormat("Mercury Vx | Research timeframe=%s pattern=%s lookback=%d longOnly=%s TP/SL=%.2f risk=%.2f%%",
                   EnumToString(activeResearchTimeframe), EnumToString(activeResearchPattern),
                   activeResearchLookback, activeResearchLongOnly ? "true" : "false", entryRewardRisk, activeRiskPct);
+   if(aggressiveMode)
+      PrintFormat("Mercury Vx Super Aggressive | Daily target=%.2f%% | Daily loss limit=%.2f%% | Peak drawdown limit=%.2f%% | Tester only",
+                  DailyTargetPct, activeDailyLossPct, activeMaxDrawdownPct);
    return INIT_SUCCEEDED;
   }
 
@@ -1176,8 +1286,16 @@ void EvaluateResearchEntry(const MqlTick &tick, const long second)
       ++researchBarsObserved;
      }
 
-   if(ManagePosition(tick, second) || !newResearchBar || blockedToday ||
-      blockedByDrawdown || second < nextEntry || !InTradingSession(tick.time))
+   const bool occupied = ManagePosition(tick, second);
+   if(aggressiveMode && !occupied && !profitLockedToday &&
+      DailyEquityTargetReached(dayStartEquity, AccountInfoDouble(ACCOUNT_EQUITY)))
+     {
+      profitLockedToday = true;
+      ++profitLocks;
+     }
+   if(occupied || !newResearchBar || blockedToday || blockedByDrawdown ||
+      second < nextEntry || !InTradingSession(tick.time) ||
+      (aggressiveMode && (profitLockedToday || second % 86400 >= AggressiveDayCutoff)))
       return;
 
    const int slow = 4 * activeResearchLookback;
@@ -1204,7 +1322,7 @@ void EvaluateResearchEntry(const MqlTick &tick, const long second)
    const int direction = SwingSignal(bars, (int)activeResearchPattern, activeResearchLookback,
                                      slow, activeResearchLongOnly ? 1 : 0, atr);
    if(direction != 0)
-      Enter(direction, tick, second, "HTF research", atr);
+      Enter(direction, tick, second, aggressiveMode ? "SA scalper" : "HTF research", atr);
    else
       ++diagnostics.signal;
   }
@@ -1398,8 +1516,9 @@ void AssessTargets(const double trades, const double wins, const double losses,
    assessment.rewardRiskMet = assessment.hasRealizedRatio && assessment.realizedRewardRisk >= RewardToRisk;
    assessment.dailyTargetMet = observedDays > 0 && daysCheckedAtTarget == observedDays;
    assessment.profitable = net > 0.0;
-   assessment.pass = assessment.enoughSample && assessment.winRateMet && assessment.rewardRiskMet &&
-                     assessment.dailyTargetMet && assessment.profitable;
+   const bool extraTargetsMet = aggressiveMode || (assessment.winRateMet && assessment.rewardRiskMet);
+   assessment.pass = assessment.enoughSample && extraTargetsMet && assessment.dailyTargetMet &&
+                     assessment.profitable;
   }
 
 double OnTester()
@@ -1437,12 +1556,19 @@ double OnTester()
    const string dailyBest = hasDayReturn ? DoubleToString(bestDayPct, 4) + "%" : "n/a";
    const string dailyWorst = hasDayReturn ? DoubleToString(worstDayPct, 4) + "%" : "n/a";
    const string result = assessment.pass ? "PASS" : "FAIL";
-   PrintFormat("Mercury Vx | Targets=%s | Sample=%s | WinRateAtLeast75=%s | RealizedRewardRisk=%s | RewardRiskAtLeast3=%s | NetProfitPositive=%s",
-               result, assessment.enoughSample ? "SUFFICIENT" : "INSUFFICIENT",
-               assessment.winRateMet ? "YES" : "NO", realized,
-               assessment.rewardRiskMet ? "YES" : "NO", assessment.profitable ? "YES" : "NO");
+   if(aggressiveMode)
+      PrintFormat("Mercury Vx | Daily50Targets=%s | Sample=%s | NetProfitPositive=%s",
+                  result, assessment.enoughSample ? "SUFFICIENT" : "INSUFFICIENT",
+                  assessment.profitable ? "YES" : "NO");
+   else
+      PrintFormat("Mercury Vx | Targets=%s | Sample=%s | WinRateAtLeast75=%s | RealizedRewardRisk=%s | RewardRiskAtLeast3=%s | NetProfitPositive=%s",
+                  result, assessment.enoughSample ? "SUFFICIENT" : "INSUFFICIENT",
+                  assessment.winRateMet ? "YES" : "NO", realized,
+                  assessment.rewardRiskMet ? "YES" : "NO", assessment.profitable ? "YES" : "NO");
    PrintFormat("Mercury Vx | Daily equity | DaysAt50Pct=%d/%d | AllDaysAt50Pct=%s | Best=%s | Worst=%s",
                daysAtTarget, daysObserved, assessment.dailyTargetMet ? "YES" : "NO", dailyBest, dailyWorst);
+   PrintFormat("Mercury Vx | Daily outcomes | Positive=%d Negative=%d Flat=%d Invalid=%d ProfitLocks=%d",
+               positiveDays, negativeDays, flatDays, invalidDays, profitLocks);
    PrintFormat("Mercury Vx | Exit deals | SL=%d TP=%d Other=%d | AcceptedTimeExitRequests=%d | DrawdownHalt=%s",
                stopLossDeals, takeProfitDeals, otherExitDeals, acceptedTimeExits,
                blockedByDrawdown ? "YES" : "NO");
@@ -1454,6 +1580,11 @@ double OnTester()
    if(csv != INVALID_HANDLE)
       FileFlush(csv);
 
+   if(aggressiveMode)
+     {
+      const double hitRate = daysObserved > 0 ? (double)daysAtTarget / daysObserved : 0.0;
+      return 10000.0 * hitRate + 100.0 * Unit(netPct / 100.0) - drawdown;
+     }
    const double score = 100.0 * Unit(netPct / 100.0) - drawdown + 0.10 * assessment.winRate;
    if(!assessment.enoughSample)
       return score - 30000.0;
