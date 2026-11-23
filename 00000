@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
-//|                  Midas_Vx_Quantitative_SuperAggressive_v8_1.mq5  |
+//|                  Midas_Vx_Quantitative_SuperAggressive_v8_2.mq5  |
 //|                                  MIDAS VX Quantitative Research  |
-//| MIDAS VX V8.1: ANTI-HANG O(1) LOT ENGINE + EQUITY GOVERNOR       |
+//| MIDAS VX V8.2: TESTER-SAFE MEMORY + UI THROTTLE + EQUITY GOV     |
 //+------------------------------------------------------------------+
 #property copyright "MIDAS VX Quantitative Research"
-#property version   "8.10"
-#property description "MIDAS VX V8.1: Dynamic Lot Digits (XAU/BTC), O(1) Margin Cap & Continuous Engine A"
+#property version   "8.20"
+#property description "MIDAS VX V8.2: Anti-Crash Tester Memory Optimization, 250ms UI Throttle & Continuous Engine A"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -52,8 +52,8 @@ enum ENUM_MARKET_REGIME
 
 #define TICK_BUFFER_CAPACITY 64
 #define POS_REGISTRY_SIZE    128
-#define COMMENT_PREFIX       "MVX81"
-#define UI_PREFIX            "MVX81_UI_"
+#define COMMENT_PREFIX       "MVX82"
+#define UI_PREFIX            "MVX82_UI_"
 
 //+------------------------------------------------------------------+
 //| Input Parameters                                                 |
@@ -71,7 +71,7 @@ input double         InpShieldRiskMult            = 0.25;    // Risk Multiplier 
 input int            InpDDCooldownMinutes         = 15;      // Pause Minutes After Daily Loss Guard
 input double         InpMaxCumulativeRiskPct      = 6.0;     // Max Cumulative Open Exposure %
 input int            InpMaxOpenSignalsSymbol      = 2;       // Max Concurrent Signals on Symbol
-input int            InpMaxTranchesPerSignal      = 6;       // Auto-Split Orders When Lot > Broker Max Volume
+input int            InpMaxTranchesPerSignal      = 3;       // Auto-Split Orders (3x Prevents Tester RAM Overload)
 input double         InpMinMarginLevelPct         = 250.0;   // Min Margin Level % Guard (Prevents Stop-Out)
 input bool           InpAllowMinLotFloor          = true;    // Keep Min-Lot Floor on Small Accounts
 input bool           InpUseEquityCompounding      = true;    // Compound Lot Size on Equity Growth
@@ -123,7 +123,7 @@ input double         InpTrailActivationRR         = 0.85;    // Activate Trailin
 input double         InpTrailStepATR              = 0.48;    // Trailing Distance (x M1 ATR)
 input bool           InpUseMomentumExit           = true;    // Exit on Tick Imbalance Reversal
 input int            InpMaxHoldSeconds            = 1200;    // Max Position Hold Time (20m)
-input int            InpReEntryCooldownSec        = 5;       // Min Cooldown Between Signals (Seconds)
+input int            InpReEntryCooldownSec        = 15;      // Min Cooldown Between Signals (Seconds)
 
 input group "=== 6. STRATEGY SELF-CALIBRATION ==="
 input bool           InpUseAdaptiveSelfOpt        = true;    // Enable Per-Strategy Self-Calibration
@@ -137,9 +137,9 @@ input bool           InpUseSessionFilter          = false;   // Restrict Trading
 input int            InpSessionStartHour          = 2;       // Session Start Hour
 input int            InpSessionEndHour            = 22;      // Session End Hour
 input bool           InpAvoidGoldRollover         = true;    // Block Daily Rollover Spread Spike
-input ulong          InpMagicNumber               = 20260810;// EA Magic Number V8.1
+input ulong          InpMagicNumber               = 20260820;// EA Magic Number V8.2
 input ulong          InpSlippageDeviation         = 35;      // Max Order Deviation (Points)
-input bool           InpShowDashboardPanel        = true;    // Show Interactive HUD Panel
+input bool           InpShowDashboardPanel        = true;    // Show Interactive HUD Panel (Throttled 250ms)
 input int            InpPanelX                    = 14;      // Panel X Offset
 input int            InpPanelY                    = 24;      // Panel Y Offset
 
@@ -316,9 +316,9 @@ struct SRuntimeConfig
       strat_enabled[STRAT_A5_INST_PULLBACK] = InpEnableStratA5_Pullback;
 
       trading_paused                        = false;
-      SetStatus("INITIALIZING V8.1 ANTI-HANG ENGINE...", false);
+      SetStatus("INITIALIZING V8.2 TESTER-SAFE ENGINE...", false);
 
-      string gv_mode = StringFormat("MVX81_MODE_%I64u_%s", magic, symbol);
+      string gv_mode = StringFormat("MVX82_MODE_%I64u_%s", magic, symbol);
       if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(gv_mode))
       {
          int saved = (int)GlobalVariableGet(gv_mode);
@@ -334,7 +334,7 @@ struct SRuntimeConfig
    void SaveModeState(ulong magic, const string symbol) const
    {
       if(MQLInfoInteger(MQL_TESTER)) return;
-      string gv_mode = StringFormat("MVX81_MODE_%I64u_%s", magic, symbol);
+      string gv_mode = StringFormat("MVX82_MODE_%I64u_%s", magic, symbol);
       GlobalVariableSet(gv_mode, (double)risk_mode);
    }
 };
@@ -1288,7 +1288,7 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| 4. Capital Governance & 3-Tier Equity-Curve Governor (V8.1)      |
+//| 4. Capital Governance & 3-Tier Equity-Curve Governor (V8.2)      |
 //+------------------------------------------------------------------+
 class CRiskAndCapitalManager
 {
@@ -1317,10 +1317,10 @@ public:
       m_gov_state      = GOV_STATE_EXPANSION;
 
       long login      = AccountInfoInteger(ACCOUNT_LOGIN);
-      m_gv_ath_key    = StringFormat("MVX81_ATH_%I64d", login);
-      m_gv_anchor_key = StringFormat("MVX81_ANC_%I64d", login);
-      m_gv_daily_key  = StringFormat("MVX81_DAYEQ_%I64d", login);
-      m_gv_day_key    = StringFormat("MVX81_DOY_%I64d", login);
+      m_gv_ath_key    = StringFormat("MVX82_ATH_%I64d", login);
+      m_gv_anchor_key = StringFormat("MVX82_ANC_%I64d", login);
+      m_gv_daily_key  = StringFormat("MVX82_DAYEQ_%I64d", login);
+      m_gv_day_key    = StringFormat("MVX82_DOY_%I64d", login);
 
       double eq = AccountInfoDouble(ACCOUNT_EQUITY);
 
@@ -1551,7 +1551,7 @@ public:
       return (CalculateCumulativeOpenRiskCurrency() / eq) * 100.0;
    }
 
-   // O(1) Anti-Hang Margin & Dynamic Lot Calculation (Zero Infinite Loops)
+   // O(1) Anti-Hang Margin & Dynamic Lot Calculation
    double ComputeValidatedTotalLots(double sl_distance_price, double strategy_mult,
                                     ENUM_ORDER_TYPE order_type, double entry_price,
                                     double &out_total_risk_money, string &reject_reason) const
@@ -1572,7 +1572,6 @@ public:
          return 0.0;
       }
 
-      // Prevent Stop-Out when dynamic leverage drops on large accounts
       double used_margin = AccountInfoDouble(ACCOUNT_MARGIN);
       if(used_margin > 0.0)
       {
@@ -1626,7 +1625,7 @@ public:
       if(lot_step <= 0.0) lot_step = 0.01;
       if(max_lot <= 0.0)  max_lot  = 100.0;
 
-      int max_tranches     = MathMax(1, MathMin(InpMaxTranchesPerSignal, 8));
+      int max_tranches     = MathMax(1, MathMin(InpMaxTranchesPerSignal, 6));
       double total_cap_lot = max_lot * (double)max_tranches;
 
       double norm_lots = NormalizeDouble(MathFloor((raw_lots + 1e-11) / lot_step) * lot_step, lot_digs);
@@ -1646,7 +1645,6 @@ public:
       if(norm_lots > total_cap_lot)
          norm_lots = total_cap_lot;
 
-      // Instant O(1) Analytical Margin Cap (Replaces Iterative Loop)
       double margin_one_lot = 0.0;
       if(OrderCalcMargin(order_type, m_symbol, 1.0, entry_price, margin_one_lot) && margin_one_lot > 0.0)
       {
@@ -2059,10 +2057,10 @@ public:
 
       double remaining_lots = NormalizeDouble(total_lots, lot_digs);
       int    tranches_sent  = 0;
-      int    max_tranches   = MathMax(1, MathMin(InpMaxTranchesPerSignal, 8));
+      int    max_tranches   = MathMax(1, MathMin(InpMaxTranchesPerSignal, 6));
       int    loop_guard     = 0;
 
-      while(remaining_lots >= min_lot && tranches_sent < max_tranches && loop_guard++ < 12)
+      while(remaining_lots >= min_lot && tranches_sent < max_tranches && loop_guard++ < 8)
       {
          double slice_lot = NormalizeLot(m_symbol, MathMin(remaining_lots, max_lot));
          if(slice_lot < min_lot) break;
@@ -2263,7 +2261,7 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| 7. Interactive Cyber-Slate Quantitative HUD Panel                |
+//| 7. Throttled Interactive Quantitative HUD Panel (250ms Safe)     |
 //+------------------------------------------------------------------+
 class CMidasDashboardPanel
 {
@@ -2274,6 +2272,8 @@ private:
    int      m_y;
    int      m_w;
    datetime m_close_confirm_until;
+   uint     m_last_poll_ms;
+   uint     m_last_draw_ms;
 
    color C_BG_MAIN, C_BG_CARD, C_BORDER, C_CYAN, C_EMERALD, C_AMBER, C_CRIMSON, C_TEXT_PRI, C_TEXT_SEC, C_BTN_IDLE;
 
@@ -2358,6 +2358,8 @@ public:
       m_y                   = y;
       m_w                   = 368;
       m_close_confirm_until = 0;
+      m_last_poll_ms        = 0;
+      m_last_draw_ms        = 0;
 
       C_BG_MAIN  = C'11,15,22';
       C_BG_CARD  = C'19,25,36';
@@ -2386,7 +2388,7 @@ public:
       {
          CreateRect("BG_MIN", x, y, w, 34, C_BG_MAIN, C_CYAN);
          CreateRect("TOP_BAR", x, y, w, 3, C_CYAN, C_CYAN);
-         CreateLabel("HDR_TITLE", x + 10, y + 9, "MIDAS VX V8.1 CONTINUOUS // " + _Symbol, C_TEXT_PRI, 9, "Segoe UI Bold");
+         CreateLabel("HDR_TITLE", x + 10, y + 9, "MIDAS VX V8.2 SAFE // " + _Symbol, C_TEXT_PRI, 9, "Segoe UI Bold");
          CreateLabel("HDR_BADGE", x + 235, y + 10, RiskModeName(g_cfg.risk_mode), C_AMBER, 8, "Consolas");
          CreateButton("BTN_MIN", x + w - 30, y + 6, 22, 22, "+", C_CYAN, C_BG_CARD, C_BORDER, 10);
          ChartRedraw(0);
@@ -2403,7 +2405,7 @@ public:
 
       CreateRect("BG_MAIN", x, y, w, total_h, C_BG_MAIN, C_BORDER);
       CreateRect("TOP_BAR", x, y, w, 3, C_CYAN, C_CYAN);
-      CreateLabel("HDR_TITLE", x + 12, y + 9, "MIDAS VX V8.1 // EQUITY GOVERNOR", C_TEXT_PRI, 9, "Segoe UI Bold");
+      CreateLabel("HDR_TITLE", x + 12, y + 9, "MIDAS VX V8.2 // EQUITY GOVERNOR", C_TEXT_PRI, 9, "Segoe UI Bold");
       CreateLabel("HDR_SUB", x + 258, y + 10, _Symbol, C_CYAN, 8, "Consolas");
       CreateButton("BTN_MIN", x + w - 30, y + 6, 22, 22, "_", C_TEXT_PRI, C_BG_CARD, C_BORDER, 9);
 
@@ -2444,7 +2446,7 @@ public:
       }
 
       CreateRect("CARD_STATUS", x + 8, s_y, w - 16, 20, C_BG_CARD, C_BORDER);
-      CreateLabel("VAL_STATUS", x + 14, s_y + 3, "STATUS: INITIALIZING V8.1...", C_CYAN, 7, "Consolas");
+      CreateLabel("VAL_STATUS", x + 14, s_y + 3, "STATUS: INITIALIZING V8.2...", C_CYAN, 7, "Consolas");
 
       CreateButton("BTN_PAUSE", x + 8, f_y, 174, 26, "ENGINE A: ACTIVE", C_BG_MAIN, C_EMERALD, C_EMERALD, 8);
       CreateButton("BTN_CLOSE_ALL", x + 188, f_y, w - 196, 26, "CLOSE ALL POSITIONS", C_TEXT_PRI, C'65,24,32', C_CRIMSON, 8);
@@ -2455,6 +2457,10 @@ public:
    void PollTesterButtonClicks(CMicrostructureEngine &micro, CAdaptiveStatsTracker &stats, CExecutionEngine &exec)
    {
       if(!m_enabled) return;
+      uint now_ms = GetTickCount();
+      if(now_ms - m_last_poll_ms < 200) return;
+      m_last_poll_ms = now_ms;
+
       string btns[12] = {
          "BTN_MIN", "BTN_MODE_0", "BTN_MODE_1", "BTN_MODE_2",
          "BTN_STRAT_0", "BTN_STRAT_1", "BTN_STRAT_2", "BTN_STRAT_3", "BTN_STRAT_4", "BTN_STRAT_5",
@@ -2468,9 +2474,13 @@ public:
       }
    }
 
-   void Update(const CMicrostructureEngine &micro, const CMTFContextEngine &mtf, const CRiskAndCapitalManager &risk, const CAdaptiveStatsTracker &stats, const CExecutionEngine &exec)
+   void Update(const CMicrostructureEngine &micro, const CMTFContextEngine &mtf, const CRiskAndCapitalManager &risk, const CAdaptiveStatsTracker &stats, const CExecutionEngine &exec, bool force = false)
    {
       if(!m_enabled) return;
+      uint now_ms = GetTickCount();
+      if(!force && (now_ms - m_last_draw_ms < 250)) return;
+      m_last_draw_ms = now_ms;
+
       if(m_minimized)
       {
          color m_clr = (g_cfg.risk_mode == RISK_MODE_AGGRESSIVE) ? C_CYAN : ((g_cfg.risk_mode == RISK_MODE_SUPER_AGGRESSIVE) ? C_AMBER : C_CRIMSON);
@@ -2667,9 +2677,9 @@ int OnInit()
    g_exec.Init(_Symbol, InpMagicNumber);
 
    g_panel.Init(InpPanelX, InpPanelY);
-   g_panel.Update(g_micro, g_mtf, g_risk, g_stats, g_exec);
+   g_panel.Update(g_micro, g_mtf, g_risk, g_stats, g_exec, true);
 
-   PrintFormat("[MIDAS VX V8.1] Initialized on %s | LotDigits=%d | Mode=%s", _Symbol, GetLotDigits(_Symbol), RiskModeName(g_cfg.risk_mode));
+   PrintFormat("[MIDAS VX V8.2] Initialized on %s | LotDigits=%d | Mode=%s", _Symbol, GetLotDigits(_Symbol), RiskModeName(g_cfg.risk_mode));
    return INIT_SUCCEEDED;
 }
 
@@ -2685,7 +2695,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
    {
       if(g_panel.OnClick(sparam, g_micro, g_stats, g_exec))
       {
-         g_panel.Update(g_micro, g_mtf, g_risk, g_stats, g_exec);
+         g_panel.Update(g_micro, g_mtf, g_risk, g_stats, g_exec, true);
          ChartRedraw(0);
       }
    }
