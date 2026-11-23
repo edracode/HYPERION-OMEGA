@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
-//|                  Midas_Vx_Quantitative_SuperAggressive_v8.mq5    |
+//|                  Midas_Vx_Quantitative_SuperAggressive_v8_1.mq5  |
 //|                                  MIDAS VX Quantitative Research  |
-//| MIDAS VX V8.0 CONTINUOUS ALPHA + EQUITY-CURVE GOVERNOR + M1 A5   |
+//| MIDAS VX V8.1: ANTI-HANG O(1) LOT ENGINE + EQUITY GOVERNOR       |
 //+------------------------------------------------------------------+
 #property copyright "MIDAS VX Quantitative Research"
-#property version   "8.00"
-#property description "MIDAS VX V8.0: Continuous Engine A (A0-A5) + Dynamic Equity-Curve Drawdown Governor"
+#property version   "8.10"
+#property description "MIDAS VX V8.1: Dynamic Lot Digits (XAU/BTC), O(1) Margin Cap & Continuous Engine A"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -33,12 +33,12 @@ enum ENUM_GOVERNOR_STATE
 
 enum ENUM_STRATEGY_ID
 {
-   STRAT_A0_MOMENTUM      = 0, // A0: M1/M5 Ultra-Fast Gold Momentum
+   STRAT_A0_MOMENTUM      = 0, // A0: M1/M5 Ultra-Fast Momentum
    STRAT_A1_LIQ_SWEEP     = 1, // A1: M1/M15 Liquidity Sweep Reversal
    STRAT_A2_MEAN_REV      = 2, // A2: M1 Quantitative Mean Reversion
    STRAT_A3_VOL_EXPL      = 3, // A3: M1 Volatility Explosion Breakout
    STRAT_A4_TREND_IMP     = 4, // A4: M1 Trend Impulse Continuation
-   STRAT_A5_INST_PULLBACK = 5, // A5: M1/M5 Institutional EMA21 Pullback (NEW V8.0)
+   STRAT_A5_INST_PULLBACK = 5, // A5: M1/M5 Institutional EMA21 Pullback
    STRAT_COUNT            = 6
 };
 
@@ -52,8 +52,8 @@ enum ENUM_MARKET_REGIME
 
 #define TICK_BUFFER_CAPACITY 64
 #define POS_REGISTRY_SIZE    128
-#define COMMENT_PREFIX       "MVX80"
-#define UI_PREFIX            "MVX80_UI_"
+#define COMMENT_PREFIX       "MVX81"
+#define UI_PREFIX            "MVX81_UI_"
 
 //+------------------------------------------------------------------+
 //| Input Parameters                                                 |
@@ -71,17 +71,18 @@ input double         InpShieldRiskMult            = 0.25;    // Risk Multiplier 
 input int            InpDDCooldownMinutes         = 15;      // Pause Minutes After Daily Loss Guard
 input double         InpMaxCumulativeRiskPct      = 6.0;     // Max Cumulative Open Exposure %
 input int            InpMaxOpenSignalsSymbol      = 2;       // Max Concurrent Signals on Symbol
-input int            InpMaxTranchesPerSignal      = 8;       // Auto-Split Orders When Lot > Broker Max Volume
-input bool           InpAllowMinLotFloor          = true;    // Keep 0.01 Min-Lot Floor on Small Accounts
+input int            InpMaxTranchesPerSignal      = 6;       // Auto-Split Orders When Lot > Broker Max Volume
+input double         InpMinMarginLevelPct         = 250.0;   // Min Margin Level % Guard (Prevents Stop-Out)
+input bool           InpAllowMinLotFloor          = true;    // Keep Min-Lot Floor on Small Accounts
 input bool           InpUseEquityCompounding      = true;    // Compound Lot Size on Equity Growth
 
 input group "=== 2. STRATEGY MODULE TOGGLES (ENGINE A0 - A5) ==="
-input bool           InpEnableStratA0_Momentum    = true;    // A0: M1/M5 Ultra-Fast Gold Momentum
+input bool           InpEnableStratA0_Momentum    = true;    // A0: M1/M5 Ultra-Fast Momentum
 input bool           InpEnableStratA1_LiqSweep    = true;    // A1: M1/M15 Liquidity Sweep Reversal
 input bool           InpEnableStratA2_MeanRev     = true;    // A2: M1 Quantitative Mean Reversion
 input bool           InpEnableStratA3_VolExpl     = true;    // A3: M1 Volatility Explosion Breakout
 input bool           InpEnableStratA4_TrendImp    = true;    // A4: M1 Trend Impulse Continuation
-input bool           InpEnableStratA5_Pullback    = true;    // A5: M1/M5 Institutional EMA21 Pullback (V8.0)
+input bool           InpEnableStratA5_Pullback    = true;    // A5: M1/M5 Institutional EMA21 Pullback
 
 input group "=== 3. MICROSTRUCTURE & M5 CONFLUENCE FILTER ==="
 input int            InpTickWindow                = 20;      // Microstructure Tick Window (<=64)
@@ -89,9 +90,9 @@ input double         InpMinTickVelocity           = 0.25;    // Min Tick Velocit
 input double         InpMinExpectancyR            = 0.06;    // Min Cost-Adjusted Net Expectancy (R-multiples)
 input double         InpMinM5ADXForBreakout       = 18.0;    // Min M5 ADX for Breakout Modules (A0/A3)
 input double         InpCommissionPerLot          = 0.0;     // Round-Turn Commission/Lot (0 = Auto)
-input double         InpBaseSlippagePips          = 0.25;    // Initial Slippage Buffer in Gold Pips
-input double         InpMaxSpreadPips             = 0.0;     // Hard Max Spread in Gold Pips (0 = Auto)
-input double         InpMaxSpreadATR_Ratio        = 0.35;    // Max Spread / ATR Ratio
+input double         InpBaseSlippagePips          = 0.25;    // Initial Slippage Buffer in Pips
+input double         InpMaxSpreadPips             = 0.0;     // Hard Max Spread in Pips (0 = Auto)
+input double         InpMaxSpreadATR_Ratio        = 0.45;    // Max Spread / ATR Ratio (Auto-scales for XAU/BTC)
 
 input group "=== 4. MULTI-TIMEFRAME INDICATORS ==="
 input int            InpM1_FastEMA                = 8;       // M1 Fast EMA Period
@@ -131,21 +132,49 @@ input int            InpMinTradesForAdapt         = 10;      // Min Sample Size 
 input double         InpSuspendExpectancyFloor    = -0.35;   // Suspend Single Strategy Below Floor
 input int            InpSuspendCooldownMinutes    = 15;      // Strategy Cooldown (Minutes)
 
-input group "=== 7. XAUUSD SESSION, BROKER & HUD ==="
+input group "=== 7. SESSION, BROKER & HUD ==="
 input bool           InpUseSessionFilter          = false;   // Restrict Trading to Active Server Hours
 input int            InpSessionStartHour          = 2;       // Session Start Hour
 input int            InpSessionEndHour            = 22;      // Session End Hour
-input bool           InpAvoidGoldRollover         = true;    // Block COMEX Rollover Spread Spike
-input ulong          InpMagicNumber               = 20260800;// EA Magic Number V8.0
+input bool           InpAvoidGoldRollover         = true;    // Block Daily Rollover Spread Spike
+input ulong          InpMagicNumber               = 20260810;// EA Magic Number V8.1
 input ulong          InpSlippageDeviation         = 35;      // Max Order Deviation (Points)
 input bool           InpShowDashboardPanel        = true;    // Show Interactive HUD Panel
 input int            InpPanelX                    = 14;      // Panel X Offset
 input int            InpPanelY                    = 24;      // Panel Y Offset
 
 //+------------------------------------------------------------------+
-//| Gold Pip Normalization Helper                                    |
+//| Dynamic Lot & Pip Precision Helpers (Supports 0.001 & 0.01 Lots) |
 //+------------------------------------------------------------------+
-double GetGoldPipScale(const string symbol)
+int GetLotDigits(const string symbol)
+{
+   double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0.0) return 2;
+   int digits = 0;
+   while(step < 1.0 - 1e-9 && digits < 6)
+   {
+      step *= 10.0;
+      digits++;
+   }
+   return digits;
+}
+
+double NormalizeLot(const string symbol, double lots)
+{
+   double min_lot  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double max_lot  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double lot_step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   int    lot_digs = GetLotDigits(symbol);
+
+   if(lot_step <= 0.0) lot_step = 0.01;
+   if(lots < min_lot)  return 0.0;
+   if(max_lot > 0.0 && lots > max_lot) lots = max_lot;
+
+   double steps = MathFloor((lots + 1e-11) / lot_step);
+   return NormalizeDouble(steps * lot_step, lot_digs);
+}
+
+double GetPipScale(const string symbol)
 {
    int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
    if(digits == 3 || digits == 5) return 10.0;
@@ -287,9 +316,9 @@ struct SRuntimeConfig
       strat_enabled[STRAT_A5_INST_PULLBACK] = InpEnableStratA5_Pullback;
 
       trading_paused                        = false;
-      SetStatus("INITIALIZING V8.0 CONTINUOUS ALPHA...", false);
+      SetStatus("INITIALIZING V8.1 ANTI-HANG ENGINE...", false);
 
-      string gv_mode = StringFormat("MVX80_MODE_%I64u_%s", magic, symbol);
+      string gv_mode = StringFormat("MVX81_MODE_%I64u_%s", magic, symbol);
       if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(gv_mode))
       {
          int saved = (int)GlobalVariableGet(gv_mode);
@@ -305,7 +334,7 @@ struct SRuntimeConfig
    void SaveModeState(ulong magic, const string symbol) const
    {
       if(MQLInfoInteger(MQL_TESTER)) return;
-      string gv_mode = StringFormat("MVX80_MODE_%I64u_%s", magic, symbol);
+      string gv_mode = StringFormat("MVX81_MODE_%I64u_%s", magic, symbol);
       GlobalVariableSet(gv_mode, (double)risk_mode);
    }
 };
@@ -1259,7 +1288,7 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| 4. Capital Governance & 3-Tier Equity-Curve Governor (V8.0)      |
+//| 4. Capital Governance & 3-Tier Equity-Curve Governor (V8.1)      |
 //+------------------------------------------------------------------+
 class CRiskAndCapitalManager
 {
@@ -1288,10 +1317,10 @@ public:
       m_gov_state      = GOV_STATE_EXPANSION;
 
       long login      = AccountInfoInteger(ACCOUNT_LOGIN);
-      m_gv_ath_key    = StringFormat("MVX80_ATH_%I64d", login);
-      m_gv_anchor_key = StringFormat("MVX80_ANC_%I64d", login);
-      m_gv_daily_key  = StringFormat("MVX80_DAYEQ_%I64d", login);
-      m_gv_day_key    = StringFormat("MVX80_DOY_%I64d", login);
+      m_gv_ath_key    = StringFormat("MVX81_ATH_%I64d", login);
+      m_gv_anchor_key = StringFormat("MVX81_ANC_%I64d", login);
+      m_gv_daily_key  = StringFormat("MVX81_DAYEQ_%I64d", login);
+      m_gv_day_key    = StringFormat("MVX81_DOY_%I64d", login);
 
       double eq = AccountInfoDouble(ACCOUNT_EQUITY);
 
@@ -1522,6 +1551,7 @@ public:
       return (CalculateCumulativeOpenRiskCurrency() / eq) * 100.0;
    }
 
+   // O(1) Anti-Hang Margin & Dynamic Lot Calculation (Zero Infinite Loops)
    double ComputeValidatedTotalLots(double sl_distance_price, double strategy_mult,
                                     ENUM_ORDER_TYPE order_type, double entry_price,
                                     double &out_total_risk_money, string &reject_reason) const
@@ -1540,6 +1570,18 @@ public:
       {
          reject_reason = "ZERO EQUITY";
          return 0.0;
+      }
+
+      // Prevent Stop-Out when dynamic leverage drops on large accounts
+      double used_margin = AccountInfoDouble(ACCOUNT_MARGIN);
+      if(used_margin > 0.0)
+      {
+         double margin_level = (equity / used_margin) * 100.0;
+         if(margin_level < MathMax(150.0, InpMinMarginLevelPct))
+         {
+            reject_reason = StringFormat("MARGIN GUARD (%.0f%%)", margin_level);
+            return 0.0;
+         }
       }
 
       double risk_pct = GetEffectiveRiskPct() * strategy_mult;
@@ -1576,18 +1618,18 @@ public:
          return 0.0;
       }
 
-      double raw_lots = target_risk_money / loss_per_lot;
-
-      double min_lot  = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MIN);
-      double max_lot  = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MAX);
-      double lot_step = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_STEP);
+      double raw_lots  = target_risk_money / loss_per_lot;
+      double min_lot   = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MIN);
+      double max_lot   = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MAX);
+      double lot_step  = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_STEP);
+      int    lot_digs  = GetLotDigits(m_symbol);
       if(lot_step <= 0.0) lot_step = 0.01;
+      if(max_lot <= 0.0)  max_lot  = 100.0;
 
-      int max_tranches     = MathMax(1, MathMin(InpMaxTranchesPerSignal, 10));
+      int max_tranches     = MathMax(1, MathMin(InpMaxTranchesPerSignal, 8));
       double total_cap_lot = max_lot * (double)max_tranches;
 
-      double norm_lots = MathFloor(raw_lots / lot_step) * lot_step;
-      norm_lots = NormalizeDouble(norm_lots, 2);
+      double norm_lots = NormalizeDouble(MathFloor((raw_lots + 1e-11) / lot_step) * lot_step, lot_digs);
 
       if(norm_lots < min_lot)
       {
@@ -1604,20 +1646,26 @@ public:
       if(norm_lots > total_cap_lot)
          norm_lots = total_cap_lot;
 
-      double margin_req = 0.0;
-      if(OrderCalcMargin(order_type, m_symbol, norm_lots, entry_price, margin_req))
+      // Instant O(1) Analytical Margin Cap (Replaces Iterative Loop)
+      double margin_one_lot = 0.0;
+      if(OrderCalcMargin(order_type, m_symbol, 1.0, entry_price, margin_one_lot) && margin_one_lot > 0.0)
       {
          double free_margin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
-         while(norm_lots >= min_lot && margin_req > free_margin * 0.85)
+         double safe_margin = free_margin * 0.75;
+         if(safe_margin <= 0.0)
          {
-            norm_lots = NormalizeDouble(norm_lots - lot_step, 2);
+            reject_reason = "ZERO FREE MARGIN";
+            return 0.0;
+         }
+         double max_affordable_lots = safe_margin / margin_one_lot;
+         if(norm_lots > max_affordable_lots)
+         {
+            norm_lots = NormalizeDouble(MathFloor((max_affordable_lots + 1e-11) / lot_step) * lot_step, lot_digs);
             if(norm_lots < min_lot)
             {
                reject_reason = "INSUFFICIENT FREE MARGIN";
                return 0.0;
             }
-            if(!OrderCalcMargin(order_type, m_symbol, norm_lots, entry_price, margin_req))
-               return 0.0;
          }
       }
 
@@ -1733,7 +1781,7 @@ public:
 
       SSignalCandidate cand;
 
-      // A0: M1/M5 ULTRA-FAST GOLD MOMENTUM (With M5 Structure Confluence)
+      // A0: M1/M5 ULTRA-FAST MOMENTUM
       if(g_cfg.strat_enabled[STRAT_A0_MOMENTUM] && stats.IsStrategyAvailable(STRAT_A0_MOMENTUM, now))
       {
          cand.Reset();
@@ -1771,7 +1819,7 @@ public:
          if(cand.valid && cand.score > best.score) best.CopyFrom(cand);
       }
 
-      // A1: M1/M15 LIQUIDITY SWEEP REVERSAL (Boosted in Ranging / Choppy Markets)
+      // A1: M1/M15 LIQUIDITY SWEEP REVERSAL
       if(g_cfg.strat_enabled[STRAT_A1_LIQ_SWEEP] && stats.IsStrategyAvailable(STRAT_A1_LIQ_SWEEP, now))
       {
          cand.Reset();
@@ -1799,7 +1847,7 @@ public:
          if(cand.valid && cand.score > best.score) best.CopyFrom(cand);
       }
 
-      // A2: M1 QUANTITATIVE MEAN REVERSION (Primary Summer Chop Harvester)
+      // A2: M1 QUANTITATIVE MEAN REVERSION
       if(g_cfg.strat_enabled[STRAT_A2_MEAN_REV] && stats.IsStrategyAvailable(STRAT_A2_MEAN_REV, now))
       {
          cand.Reset();
@@ -1825,7 +1873,7 @@ public:
          if(cand.valid && cand.score > best.score) best.CopyFrom(cand);
       }
 
-      // A3: M1 VOLATILITY EXPLOSION BREAKOUT (Protected by M5 ADX & Trend)
+      // A3: M1 VOLATILITY EXPLOSION BREAKOUT
       if(g_cfg.strat_enabled[STRAT_A3_VOL_EXPL] && stats.IsStrategyAvailable(STRAT_A3_VOL_EXPL, now))
       {
          cand.Reset();
@@ -1881,13 +1929,12 @@ public:
          if(cand.valid && cand.score > best.score) best.CopyFrom(cand);
       }
 
-      // A5: M1/M5 INSTITUTIONAL EMA21 PULLBACK & ORDER-FLOW RECLAIM (NEW V8.0)
+      // A5: M1/M5 INSTITUTIONAL EMA21 PULLBACK & ORDER-FLOW RECLAIM
       if(g_cfg.strat_enabled[STRAT_A5_INST_PULLBACK] && stats.IsStrategyAvailable(STRAT_A5_INST_PULLBACK, now))
       {
          cand.Reset();
          if(mtf.m5_adx[0] >= 18.0 && micro.tick_velocity >= g_cfg.min_tick_velocity)
          {
-            // Bullish institutional pullback into M1 Slow EMA (21) aligned with M5 uptrend
             if(mtf.m5_trend_dir > 0 &&
                mtf.m1_ema_fast[0] > mtf.m1_ema_slow[0] &&
                mtf.m1_low[0] <= mtf.m1_ema_slow[0] &&
@@ -1899,7 +1946,6 @@ public:
                double sl_d = MathMax(atr * 1.25, (ask - mtf.m1_low[0]) + atr * 0.25);
                FinalizeCandidate(cand, STRAT_A5_INST_PULLBACK, 1, sl_d, sl_d * 1.95, 0.60, micro, mtf, stats, risk, 1.15);
             }
-            // Bearish institutional pullback into M1 Slow EMA (21) aligned with M5 downtrend
             else if(mtf.m5_trend_dir < 0 &&
                     mtf.m1_ema_fast[0] < mtf.m1_ema_slow[0] &&
                     mtf.m1_high[0] >= mtf.m1_ema_slow[0] &&
@@ -1920,7 +1966,7 @@ public:
 };
 
 //+------------------------------------------------------------------+
-//| 6. Multi-Tranche Execution & 3-Stage Exit Manager                |
+//| 6. Multi-Tranche Execution & 3-Stage Exit Manager (Anti-Hang)    |
 //+------------------------------------------------------------------+
 class CExecutionEngine
 {
@@ -2007,17 +2053,18 @@ public:
       double min_lot  = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MIN);
       double max_lot  = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MAX);
       double lot_step = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_STEP);
+      int    lot_digs = GetLotDigits(m_symbol);
       if(lot_step <= 0.0) lot_step = 0.01;
       if(max_lot <= 0.0)  max_lot  = 100.0;
 
-      double remaining_lots = total_lots;
+      double remaining_lots = NormalizeDouble(total_lots, lot_digs);
       int    tranches_sent  = 0;
-      int    max_tranches   = MathMax(1, MathMin(InpMaxTranchesPerSignal, 10));
+      int    max_tranches   = MathMax(1, MathMin(InpMaxTranchesPerSignal, 8));
+      int    loop_guard     = 0;
 
-      while(remaining_lots >= min_lot && tranches_sent < max_tranches)
+      while(remaining_lots >= min_lot && tranches_sent < max_tranches && loop_guard++ < 12)
       {
-         double slice_lot = MathMin(remaining_lots, max_lot);
-         slice_lot = NormalizeDouble(MathFloor(slice_lot / lot_step) * lot_step, 2);
+         double slice_lot = NormalizeLot(m_symbol, MathMin(remaining_lots, max_lot));
          if(slice_lot < min_lot) break;
 
          bool sent = false;
@@ -2036,7 +2083,7 @@ public:
             if(sent && (retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_PLACED))
             {
                tranches_sent++;
-               remaining_lots = NormalizeDouble(remaining_lots - slice_lot, 2);
+               remaining_lots = NormalizeDouble(remaining_lots - slice_lot, lot_digs);
 
                ulong deal_id = m_trade.ResultDeal();
                ulong pos_id  = 0;
@@ -2074,9 +2121,9 @@ public:
       {
          m_last_order_bar  = bar_time;
          m_last_order_time = TimeCurrent();
-         g_cfg.SetStatus(StringFormat("EXEC: %s %s %.2fL (%dx) ExpR:%+.2f",
+         g_cfg.SetStatus(StringFormat("EXEC: %s %s %.*fL (%dx) ExpR:%+.2f",
                          StrategyShortCode(cand.strategy), (cand.direction > 0 ? "BUY" : "SELL"),
-                         total_lots, tranches_sent, cand.net_expectancy_r), false);
+                         lot_digs, total_lots, tranches_sent, cand.net_expectancy_r), false);
          return true;
       }
       return false;
@@ -2104,9 +2151,7 @@ public:
       long stops_level  = SymbolInfoInteger(m_symbol, SYMBOL_TRADE_STOPS_LEVEL);
       double min_dist   = (double)(MathMax(freeze_level, stops_level) + 5) * point;
 
-      double min_lot  = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MIN);
-      double lot_step = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_STEP);
-      if(lot_step <= 0.0) lot_step = 0.01;
+      double min_lot = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_MIN);
 
       datetime now = TimeCurrent();
 
@@ -2155,7 +2200,6 @@ public:
          double unrealized_dist = (pos_type == POSITION_TYPE_BUY) ? (cur_px - open_px) : (open_px - cur_px);
          double true_rr         = unrealized_dist / initial_risk;
 
-         // Momentum reversal protection
          if(InpUseMomentumExit && true_rr >= 0.55)
          {
             bool rev_flip = (pos_type == POSITION_TYPE_BUY  && micro.tick_imbalance <= -0.58 && micro.price_velocity_pts < 0.0) ||
@@ -2167,7 +2211,6 @@ public:
             }
          }
 
-         // Stage 1: Early Breakeven Lock (Faster in Caution/Shield Tiers)
          double req_be_rr = (gov_state == GOV_STATE_SHIELD) ? 0.45 : ((gov_state == GOV_STATE_CAUTION) ? 0.52 : g_cfg.be_rr);
          if(InpUseEarlyBreakeven && true_rr >= req_be_rr && !is_be_done)
          {
@@ -2186,11 +2229,9 @@ public:
             }
          }
 
-         // Stage 2: Partial Profit Bank
          if(InpUsePartialClose && true_rr >= g_cfg.partial_close_rr && !is_part_done)
          {
-            double close_vol = MathFloor((vol * (g_cfg.partial_close_pct / 100.0)) / lot_step) * lot_step;
-            close_vol = NormalizeDouble(close_vol, 2);
+            double close_vol = NormalizeLot(m_symbol, vol * (g_cfg.partial_close_pct / 100.0));
             if(close_vol >= min_lot && (vol - close_vol) >= min_lot)
             {
                if(m_trade.PositionClosePartial(ticket, close_vol, g_cfg.slippage_dev))
@@ -2201,7 +2242,6 @@ public:
             }
          }
 
-         // Stage 3: Dynamic ATR Trailing Stop
          if(InpUseTrailingStop && true_rr >= g_cfg.trail_act_rr)
          {
             double trail_dist = MathMax(min_dist, atr1 * g_cfg.trail_step_atr);
@@ -2346,7 +2386,7 @@ public:
       {
          CreateRect("BG_MIN", x, y, w, 34, C_BG_MAIN, C_CYAN);
          CreateRect("TOP_BAR", x, y, w, 3, C_CYAN, C_CYAN);
-         CreateLabel("HDR_TITLE", x + 10, y + 9, "MIDAS VX V8.0 CONTINUOUS // " + _Symbol, C_TEXT_PRI, 9, "Segoe UI Bold");
+         CreateLabel("HDR_TITLE", x + 10, y + 9, "MIDAS VX V8.1 CONTINUOUS // " + _Symbol, C_TEXT_PRI, 9, "Segoe UI Bold");
          CreateLabel("HDR_BADGE", x + 235, y + 10, RiskModeName(g_cfg.risk_mode), C_AMBER, 8, "Consolas");
          CreateButton("BTN_MIN", x + w - 30, y + 6, 22, 22, "+", C_CYAN, C_BG_CARD, C_BORDER, 10);
          ChartRedraw(0);
@@ -2363,7 +2403,7 @@ public:
 
       CreateRect("BG_MAIN", x, y, w, total_h, C_BG_MAIN, C_BORDER);
       CreateRect("TOP_BAR", x, y, w, 3, C_CYAN, C_CYAN);
-      CreateLabel("HDR_TITLE", x + 12, y + 9, "MIDAS VX V8.0 // EQUITY GOVERNOR", C_TEXT_PRI, 9, "Segoe UI Bold");
+      CreateLabel("HDR_TITLE", x + 12, y + 9, "MIDAS VX V8.1 // EQUITY GOVERNOR", C_TEXT_PRI, 9, "Segoe UI Bold");
       CreateLabel("HDR_SUB", x + 258, y + 10, _Symbol, C_CYAN, 8, "Consolas");
       CreateButton("BTN_MIN", x + w - 30, y + 6, 22, 22, "_", C_TEXT_PRI, C_BG_CARD, C_BORDER, 9);
 
@@ -2404,7 +2444,7 @@ public:
       }
 
       CreateRect("CARD_STATUS", x + 8, s_y, w - 16, 20, C_BG_CARD, C_BORDER);
-      CreateLabel("VAL_STATUS", x + 14, s_y + 3, "STATUS: INITIALIZING V8.0...", C_CYAN, 7, "Consolas");
+      CreateLabel("VAL_STATUS", x + 14, s_y + 3, "STATUS: INITIALIZING V8.1...", C_CYAN, 7, "Consolas");
 
       CreateButton("BTN_PAUSE", x + 8, f_y, 174, 26, "ENGINE A: ACTIVE", C_BG_MAIN, C_EMERALD, C_EMERALD, 8);
       CreateButton("BTN_CLOSE_ALL", x + 188, f_y, w - 196, 26, "CLOSE ALL POSITIONS", C_TEXT_PRI, C'65,24,32', C_CRIMSON, 8);
@@ -2470,7 +2510,7 @@ public:
       string m5_txt = (mtf.m5_trend_dir > 0) ? "BULL ▲" : ((mtf.m5_trend_dir < 0) ? "BEAR ▼" : "FLAT ◆");
       SetText("VAL_REGIME", StringFormat("%s | M5:%s", RegimeName(mtf.current_regime), m5_txt), C_CYAN);
 
-      double pip_scale = GetGoldPipScale(_Symbol);
+      double pip_scale = GetPipScale(_Symbol);
       SetText("VAL_VEL_SPR", StringFormat("TickVel:%.1f/s | Spr:%.1fp | ADX5:%.1f", micro.tick_velocity, (micro.current_spread_pts / pip_scale), mtf.m5_adx[0]), C_TEXT_PRI);
       SetText("VAL_AC_SLIP", StringFormat("Imbal:%+.2f | Slip:%.1fp | ReqExpR:%+.2f", micro.tick_imbalance, (micro.estimated_slippage_pts / pip_scale), risk.GetGovernorMinExpectancyR()), C_TEXT_SEC);
 
@@ -2508,7 +2548,7 @@ public:
       ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
 
       if(sparam == UI_PREFIX + "BTN_MIN") { m_minimized = !m_minimized; BuildLayout(); return true; }
-      double pip_scale = GetGoldPipScale(_Symbol);
+      double pip_scale = GetPipScale(_Symbol);
 
       if(sparam == UI_PREFIX + "BTN_MODE_0") { g_cfg.ApplyRiskMode(RISK_MODE_AGGRESSIVE, true); g_cfg.SaveModeState(InpMagicNumber, _Symbol); micro.SetBaselineSlippage(g_cfg.base_slippage_pips * pip_scale); exec.RefreshConfig(); g_cfg.SetStatus("MODE 1: AGGRESSIVE", false); return true; }
       if(sparam == UI_PREFIX + "BTN_MODE_1") { g_cfg.ApplyRiskMode(RISK_MODE_SUPER_AGGRESSIVE, true); g_cfg.SaveModeState(InpMagicNumber, _Symbol); micro.SetBaselineSlippage(g_cfg.base_slippage_pips * pip_scale); exec.RefreshConfig(); g_cfg.SetStatus("MODE 2: SUPER AGGR", false); return true; }
@@ -2562,7 +2602,7 @@ bool PassesEnvironmentFilters(string &block_reason)
    TimeCurrent(dt);
    if(InpAvoidGoldRollover && ((dt.hour == 23 && dt.min >= 55) || dt.hour == 0 || (dt.hour == 1 && dt.min <= 5)))
    {
-      block_reason = "GOLD COMEX ROLLOVER";
+      block_reason = "ROLLOVER SPREAD GUARD";
       return false;
    }
    if(InpUseSessionFilter)
@@ -2592,7 +2632,7 @@ bool PassesEnvironmentFilters(string &block_reason)
       return false;
    }
 
-   double pip_scale = GetGoldPipScale(_Symbol);
+   double pip_scale = GetPipScale(_Symbol);
    if(g_cfg.max_spread_pips > 0.0 && (g_micro.current_spread_pts / pip_scale) > g_cfg.max_spread_pips)
    {
       block_reason = "SPREAD TOO HIGH";
@@ -2617,7 +2657,7 @@ int OnInit()
    g_pos_reg.Init();
    g_cfg.InitFromInputs(InpMagicNumber, _Symbol);
 
-   double pip_scale = GetGoldPipScale(_Symbol);
+   double pip_scale = GetPipScale(_Symbol);
    g_micro.Init(g_cfg.base_slippage_pips * pip_scale);
    if(!g_mtf.Init(_Symbol)) return INIT_FAILED;
 
@@ -2629,7 +2669,7 @@ int OnInit()
    g_panel.Init(InpPanelX, InpPanelY);
    g_panel.Update(g_micro, g_mtf, g_risk, g_stats, g_exec);
 
-   PrintFormat("[MIDAS VX V8.0 CONTINUOUS] Initialized on %s | Mode=%s | Governor=Active", _Symbol, RiskModeName(g_cfg.risk_mode));
+   PrintFormat("[MIDAS VX V8.1] Initialized on %s | LotDigits=%d | Mode=%s", _Symbol, GetLotDigits(_Symbol), RiskModeName(g_cfg.risk_mode));
    return INIT_SUCCEEDED;
 }
 
