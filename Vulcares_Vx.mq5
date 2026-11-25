@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
-//|                                              Vulcares_Vx_V10.mq5 |
+//|                                              Vulcares_Vx_V11.mq5 |
 //|                                  Copyright 2026, Vulcares Quant  |
-//|      PROVEN VALUE PULLBACK + PROFIT-BANKED ANTIMARTINGALE 2X     |
+//|   SLOPE-CONFIRMED VALUE PULLBACK + PROFIT-BANKED ANTIMARTINGALE  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Vulcares Quant"
 #property link      "https://www.mql5.com"
-#property version   "10.00"
+#property version   "11.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -33,18 +33,19 @@ enum ENUM_EXEC_STATE
 
 //--- Input Parameters
 input group "=== 1. CAPITAL & PROFIT-BANKED ANTIMARTINGALE 2X ==="
-input ulong    InpMagicNumber             = 20261010;
+input ulong    InpMagicNumber             = 20261111;
 input double   InpInitialCapital          = 1000.00; // Modal Dasar (USD / USC)
 input double   InpBaseRiskPercent         = 1.00;    // Base Risk = 1.00% ($10.00 pada modal 1000)
 input bool     InpEnableAntiMartingale2x  = true;    // Aktifkan Anti-Martingale 2.0x
 input double   InpAntiMartingaleMult      = 2.00;    // Pengali 2.0x setelah menang (1.0x -> 2.0x -> Banked)
-input double   InpMaxPeakDrawdownPct      = 16.00;   // Batas Drawdown Maksimal 16%
+input double   InpMaxPeakDrawdownPct      = 15.00;   // Batas Drawdown Maksimal 15%
 
-input group "=== 2. HIGH WIN-RATE VALUE PULLBACK ENGINE ==="
-input double   InpSL_ATR_M5_Mult          = 1.90;    // Stop Loss Struktural (1.90x ATR M5)
-input double   InpTP_R_Ratio              = 1.85;    // Take Profit Target (1.85R - Hit Rate Tinggi)
-input bool     InpUseLateBreakEven        = true;    // Geser ke BE hanya setelah 80% jarak TP
-input int      InpCooldownSec             = 15;      // Jeda antar transaksi (detik)
+input group "=== 2. SLOPE-FILTERED VALUE PULLBACK ENGINE ==="
+input double   InpSL_ATR_M5_Mult          = 2.10;    // Pengali ATR M5 untuk SL
+input double   InpSL_ATR_M15_Floor        = 1.15;    // Batas Bawah SL berbasis ATR M15 (Anti-Spread)
+input double   InpTP_R_Ratio              = 2.15;    // Target Profit 2.15R (Surplus Penuh di Step 2)
+input bool     InpUseLateBreakEven        = true;    // Geser ke BE setelah 80% jarak TP
+input int      InpCooldownSec             = 20;      // Jeda antar transaksi (detik)
 input bool     InpAvoidRolloverHours      = true;    // Hindari jam spread lebar (22:00 - 01:30)
 
 input group "=== 3. UI DASHBOARD ==="
@@ -75,7 +76,9 @@ ENUM_EXEC_STATE g_exec_state      = STATE_SCANNING;
 PersistentState g_persist;
 
 int g_hATR_M5     = INVALID_HANDLE;
+int g_hATR_M15    = INVALID_HANDLE;
 int g_hEMA_50_H1  = INVALID_HANDLE;
+int g_hEMA_21_M15 = INVALID_HANDLE;
 int g_hEMA_50_M15 = INVALID_HANDLE;
 int g_hEMA_20_M5  = INVALID_HANDLE;
 int g_hBB_20_M5   = INVALID_HANDLE;
@@ -92,7 +95,7 @@ datetime g_last_m1_bar      = 0;
 bool     g_dash_minimized   = false;
 bool     g_dash_dirty       = true;
 
-#define UI_PFX "VCX10_"
+#define UI_PFX "VCX11_"
 
 //+------------------------------------------------------------------+
 //| State Persistence                                                |
@@ -100,7 +103,7 @@ bool     g_dash_dirty       = true;
 void BuildGVPrefix()
 {
    long login = AccountInfoInteger(ACCOUNT_LOGIN);
-   g_gv_prefix = StringFormat("VCX10_%I64d_%I64u_", login, InpMagicNumber);
+   g_gv_prefix = StringFormat("VCX11_%I64d_%I64u_", login, InpMagicNumber);
 }
 
 void SaveState(bool flush = false)
@@ -185,7 +188,7 @@ ENUM_ORDER_TYPE_FILLING GetFillingMode(const string sym)
 }
 
 //+------------------------------------------------------------------+
-//| Initialization (Always Active, Never Fails)                      |
+//| Initialization                                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -202,7 +205,9 @@ int OnInit()
    g_persist.hard_dd_locked = false;
 
    g_hATR_M5     = iATR(_Symbol, PERIOD_M5, 14);
+   g_hATR_M15    = iATR(_Symbol, PERIOD_M15, 14);
    g_hEMA_50_H1  = iMA(_Symbol, PERIOD_H1,  50, 0, MODE_EMA, PRICE_CLOSE);
+   g_hEMA_21_M15 = iMA(_Symbol, PERIOD_M15, 21, 0, MODE_EMA, PRICE_CLOSE);
    g_hEMA_50_M15 = iMA(_Symbol, PERIOD_M15, 50, 0, MODE_EMA, PRICE_CLOSE);
    g_hEMA_20_M5  = iMA(_Symbol, PERIOD_M5,  20, 0, MODE_EMA, PRICE_CLOSE);
    g_hBB_20_M5   = iBands(_Symbol, PERIOD_M5, 20, 0, 2.0, PRICE_CLOSE);
@@ -220,7 +225,9 @@ void OnDeinit(const int reason)
    EventKillTimer();
    SaveState(true);
    if(g_hATR_M5 != INVALID_HANDLE)     IndicatorRelease(g_hATR_M5);
+   if(g_hATR_M15 != INVALID_HANDLE)    IndicatorRelease(g_hATR_M15);
    if(g_hEMA_50_H1 != INVALID_HANDLE)  IndicatorRelease(g_hEMA_50_H1);
+   if(g_hEMA_21_M15 != INVALID_HANDLE) IndicatorRelease(g_hEMA_21_M15);
    if(g_hEMA_50_M15 != INVALID_HANDLE) IndicatorRelease(g_hEMA_50_M15);
    if(g_hEMA_20_M5 != INVALID_HANDLE)  IndicatorRelease(g_hEMA_20_M5);
    if(g_hBB_20_M5 != INVALID_HANDLE)   IndicatorRelease(g_hBB_20_M5);
@@ -319,13 +326,15 @@ void ReconcileState()
 }
 
 //+------------------------------------------------------------------+
-//| High Win-Rate Trend-Filtered Value Pullback & Snap Engine        |
+//| Slope-Confirmed Value Pullback Engine (H1 + M15 + M5 + M1)       |
 //+------------------------------------------------------------------+
 int EvaluateValuePullback(double &sl_dist_out)
 {
-   double atr5[2], e50_h1[2], e50_15[2], e20_5[2], bb_u[2], bb_l[2], rsi5[2], sto_m[2], sto_s[2];
+   double atr5[2], atr15[2], e50_h1[2], e21_15[2], e50_15[2], e20_5[2], bb_u[2], bb_l[2], rsi5[2], sto_m[2], sto_s[2];
    if(CopyBuffer(g_hATR_M5,     0, 0, 2, atr5)   < 2 ||
+      CopyBuffer(g_hATR_M15,    0, 0, 2, atr15)  < 2 ||
       CopyBuffer(g_hEMA_50_H1,  0, 0, 2, e50_h1) < 2 ||
+      CopyBuffer(g_hEMA_21_M15, 0, 0, 2, e21_15) < 2 ||
       CopyBuffer(g_hEMA_50_M15, 0, 0, 2, e50_15) < 2 ||
       CopyBuffer(g_hEMA_20_M5,  0, 0, 2, e20_5)  < 2 ||
       CopyBuffer(g_hBB_20_M5,   1, 0, 2, bb_u)   < 2 ||
@@ -344,38 +353,42 @@ int EvaluateValuePullback(double &sl_dist_out)
    double m1_l1 = iLow(_Symbol, PERIOD_M1, 1);
    double m1_h1 = iHigh(_Symbol, PERIOD_M1, 1);
 
-   sl_dist_out = atr5[0] * InpSL_ATR_M5_Mult;
+   // Hybrid ATR Floor prevents spread sweeps during quiet sessions
+   sl_dist_out = MathMax(atr5[0] * InpSL_ATR_M5_Mult, atr15[0] * InpSL_ATR_M15_Floor);
 
-   // Macro Trend Filter (H1 + M15) prevents catching falling knives
-   bool macro_bull = (bid > e50_h1[0] && bid > e50_15[0] && e20_5[0] >= e20_5[1]);
-   bool macro_bear = (bid < e50_h1[0] && bid < e50_15[0] && e20_5[0] <= e20_5[1]);
+   // Triple-EMA Alignment + Active Slope Confirmation
+   bool macro_bull = (bid > e50_h1[0] && e21_15[0] > e50_15[0] &&
+                      e50_h1[0] > e50_h1[1] && e21_15[0] > e21_15[1] && e20_5[0] > e20_5[1]);
 
-   // Buy at Value Discount inside Uptrend (Pullback to EMA20 M5 or Lower BB M5 + Stoch Turn Up)
+   bool macro_bear = (bid < e50_h1[0] && e21_15[0] < e50_15[0] &&
+                      e50_h1[0] < e50_h1[1] && e21_15[0] < e21_15[1] && e20_5[0] < e20_5[1]);
+
+   // Buy at Value Discount inside Confirmed Uptrend
    bool buy_pullback  = (macro_bull && (m1_l1 <= e20_5[0] || m1_l1 <= bb_l[0]) &&
-                         rsi5[0] > 40.0 && rsi5[0] < 65.0 &&
-                         sto_m[0] < 35.0 && sto_m[0] > sto_s[0] && m1_c1 > m1_o1);
+                         rsi5[0] > 42.0 && rsi5[0] < 65.0 &&
+                         sto_m[0] < 36.0 && sto_m[0] > sto_s[0] && m1_c1 > m1_o1);
 
-   // Sell at Value Premium inside Downtrend (Pullback to EMA20 M5 or Upper BB M5 + Stoch Turn Down)
+   // Sell at Value Premium inside Confirmed Downtrend
    bool sell_pullback = (macro_bear && (m1_h1 >= e20_5[0] || m1_h1 >= bb_u[0]) &&
-                         rsi5[0] < 60.0 && rsi5[0] > 35.0 &&
-                         sto_m[0] > 65.0 && sto_m[0] < sto_s[0] && m1_c1 < m1_o1);
+                         rsi5[0] < 58.0 && rsi5[0] > 35.0 &&
+                         sto_m[0] > 64.0 && sto_m[0] < sto_s[0] && m1_c1 < m1_o1);
 
    if(buy_pullback)
    {
-      g_buy_prob = 86.0; g_sell_prob = 14.0;
+      g_buy_prob = 88.0; g_sell_prob = 12.0;
       g_last_signal = "BUY VALUE";
       return 1;
    }
    if(sell_pullback)
    {
-      g_buy_prob = 14.0; g_sell_prob = 86.0;
+      g_buy_prob = 12.0; g_sell_prob = 88.0;
       g_last_signal = "SELL VALUE";
       return -1;
    }
 
-   if(macro_bull)      { g_buy_prob = 68.0; g_sell_prob = 32.0; g_status_note = "WAIT_BUY_DISCOUNT"; }
-   else if(macro_bear) { g_buy_prob = 32.0; g_sell_prob = 68.0; g_status_note = "WAIT_SELL_PREMIUM"; }
-   else                { g_buy_prob = 50.0; g_sell_prob = 50.0; g_status_note = "TREND_NEUTRAL"; }
+   if(macro_bull)      { g_buy_prob = 70.0; g_sell_prob = 30.0; g_status_note = "WAIT_BUY_DISCOUNT"; }
+   else if(macro_bear) { g_buy_prob = 30.0; g_sell_prob = 70.0; g_status_note = "WAIT_SELL_PREMIUM"; }
+   else                { g_buy_prob = 50.0; g_sell_prob = 50.0; g_status_note = "SLOPE_NEUTRAL"; }
 
    g_last_signal = "SCANNING";
    return 0;
@@ -495,7 +508,7 @@ void OnTick()
    double lot = ComputeSafeLot(is_buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, entry_p, sl_price);
    if(lot <= 0.0) return;
 
-   string cmt = StringFormat("VCX10_AM%.0fx", g_persist.current_mult);
+   string cmt = StringFormat("VCX11_AM%.0fx", g_persist.current_mult);
    bool sent = is_buy ? g_trade.Buy(lot, _Symbol, ask, sl_price, tp_price, cmt)
                       : g_trade.Sell(lot, _Symbol, bid, sl_price, tp_price, cmt);
 
@@ -622,7 +635,7 @@ void BuildDashboard()
    ObjectSetInteger(0, UI_PFX + "BG", OBJPROP_BORDER_COLOR, C'235,155,30');
    ObjectSetInteger(0, UI_PFX + "BG", OBJPROP_WIDTH, 1);
 
-   DrawLabel(UI_PFX + "TITLE", 22, 27, "VULCARES Vx V10.0 | VALUE ANTI-M 2X", C'245,180,45', 9, true);
+   DrawLabel(UI_PFX + "TITLE", 22, 27, "VULCARES Vx V11.0 | SLOPE ANTI-M 2X", C'245,180,45', 9, true);
    DrawButton(UI_PFX + "BTN_MIN", 320, 25, 28, 22, g_dash_minimized ? "+" : "-", C'45,50,62', clrWhite);
 
    if(g_dash_minimized) { ChartRedraw(0); return; }
@@ -670,7 +683,7 @@ void UpdateDashboard()
    }
    else
    {
-      r[7] = "ACTIVE  : NONE (SCANNING VALUE PULLBACK)";
+      r[7] = "ACTIVE  : NONE (SCANNING SLOPE PULLBACK)";
       r[8] = "FLOAT   : 0.00  |  SL: 0.00";
    }
 
