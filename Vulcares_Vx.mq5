@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                  Vulcares_Vx.mq5 |
-//|           Pyramiding / Trend-Following Layering Momentum EA       |
-//|     Min $10 (USD/USC) Stop Loss Floor + Trend Layering + Trail   |
+//|     Structural Trend + Pullback Momentum + Safe Trailing EA      |
+//|    No Premature Break-Even | No Micro-Chasing | Basket Trailing  |
 //+------------------------------------------------------------------+
 #property copyright "Vulcares Quantitative Engineering"
-#property version   "1.50"
+#property version   "2.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -18,31 +18,20 @@ enum ENUM_EXECUTION_MODE
    MODE_STRICT_SINGLE_ENTRY = 1  // Single Entry Only
 };
 
-enum ENUM_SL_MODE
-{
-   SL_PERCENT_OF_PRICE   = 0, // 1.0% Price Distance (Enforced Min $10 USD/USC Floor)
-   SL_PERCENT_OF_BALANCE = 1, // 1.0% Balance Risk (Enforced Min $10 USD/USC Floor)
-   SL_FIXED_MONEY_ONLY   = 2  // Strict Fixed Money SL ($10 USD/USC per Position)
-};
-
 enum ENUM_TRAILING_MODE
 {
-   TRAIL_HIGH_WATERMARK = 0, // High-Watermark Real-Time Tick Trailing
-   TRAIL_STEP_BASED     = 1, // Step-Based Trailing
-   TRAIL_ATR_ADAPTIVE   = 2  // Volatility/ATR Adaptive Trailing
+   TRAIL_HIGH_WATERMARK = 0, // High-Watermark Real-Time Trailing
+   TRAIL_ATR_ADAPTIVE   = 1  // ATR Volatility-Adaptive Trailing
 };
 
 enum ENUM_EA_STATE
 {
    STATE_INITIALIZING = 0,
    STATE_SCANNING,
-   STATE_SIGNAL_READY,
    STATE_ENTRY_PENDING,
    STATE_POSITION_ACTIVE,
    STATE_LAYERING_ACTIVE,
-   STATE_BREAK_EVEN_ACTIVE,
    STATE_TRAILING_ACTIVE,
-   STATE_RE_ENTRY_SCANNING,
    STATE_RISK_LOCK,
    STATE_DISCONNECTED,
    STATE_EMERGENCY_STOP
@@ -50,12 +39,10 @@ enum ENUM_EA_STATE
 
 enum ENUM_MARKET_REGIME
 {
-   REGIME_DORMANT = 0,
-   REGIME_LOW_VOLATILITY,
-   REGIME_NORMAL_VOLATILITY,
-   REGIME_HIGH_VOLATILITY,
-   REGIME_EXTREME_VOLATILITY,
-   REGIME_IMPULSE_BREAKOUT
+   REGIME_RANGING_CHOP = 0,
+   REGIME_UPTREND_CLEAN,
+   REGIME_DOWNTREND_CLEAN,
+   REGIME_HIGH_VOLATILITY
 };
 
 //--- Input Parameters
@@ -64,62 +51,53 @@ input bool                InpTradingEnabled       = true;                      /
 input bool                InpDemoOnly             = true;                      // Safety: Demo/Tester Only Mode
 input ulong               InpMagicNumber          = 20260306;                  // Magic Number
 input string              InpTradingSymbol        = "";                        // Trading Symbol (Empty = Current)
-input ENUM_TIMEFRAMES     InpSignalTimeframe      = PERIOD_M1;                 // Signal Timeframe (M1)
+input ENUM_TIMEFRAMES     InpSignalTimeframe      = PERIOD_M1;                 // Execution Timeframe (M1)
+input ENUM_TIMEFRAMES     InpTrendTimeframe       = PERIOD_M15;                // Macro Trend Filter Timeframe (M15)
 input bool                InpEnableBuy            = true;                      // Enable BUY Engine
 input bool                InpEnableSell           = true;                      // Enable SELL Engine
-input ENUM_EXECUTION_MODE InpExecutionMode        = MODE_TREND_LAYERING;       // Execution Mode (Trend Layering)
+input ENUM_EXECUTION_MODE InpExecutionMode        = MODE_TREND_LAYERING;       // Execution Mode
 
-input group "=== 2. REAL-TIME MOMENTUM & ENTRY SETTINGS ==="
-input int                 InpMomentumWindowMs     = 2000;                      // Momentum Window (ms)
-input double              InpTickVelocityThresh   = 15.0;                      // Min Tick Velocity (points/sec)
-input double              InpAccelerationThresh   = 5.0;                       // Min Tick Acceleration (points/sec^2)
-input double              InpTickConsistencyMin   = 0.65;                      // Min Directional Tick Ratio (0.0-1.0)
-input int                 InpBreakoutLookbackBars = 3;                         // Micro Breakout Lookback (M1 Bars)
-input double              InpBreakoutSensitivity  = 0.5;                       // Micro Breakout Offset (points)
-input double              InpEntryConfidenceMin   = 70.0;                      // Min Entry Confidence Score (0-100)
-input bool                InpEnableIntrabarEntry  = true;                      // Allow Intrabar Execution
+input group "=== 2. ANTI-CHOP STRUCTURAL TREND & ENTRY FILTER ==="
+input int                 InpFastEMAPeriod        = 21;                        // Fast EMA Period (M1 & M15)
+input int                 InpSlowEMAPeriod        = 55;                        // Slow EMA Period (M1 & M15)
+input int                 InpTrendEMAPeriod       = 200;                       // Macro Trend EMA Period (M15)
+input int                 InpATRPeriod            = 14;                        // ATR Period (M1)
+input int                 InpMinATRPoints         = 120;                       // Min M1 ATR to Trade (Skip Dead Chop)
+input int                 InpMaxATRPoints         = 1500;                      // Max M1 ATR (Skip News Spikes)
+input double              InpMaxEMADistATR        = 1.2;                       // Max Entry Distance from Fast EMA (in ATR)
+input int                 InpMomentumWindowMs     = 3000;                      // Tick Confirmation Window (ms)
+input double              InpTickVelocityThresh   = 12.0;                      // Min Tick Velocity in Trend Direction (pts/s)
+input int                 InpMinCooldownSeconds   = 45;                        // Min Cooldown After Exit (Prevents Churn!)
 
 input group "=== 3. TREND PYRAMIDING LAYERING SETTINGS ==="
 input double              InpBaseLot              = 0.01;                      // Fixed Base Lot (0.01)
-input bool                InpAutoLotMode          = false;                     // Auto Lot Mode (False = Fixed 0.01)
-input double              InpRiskPercentPerTrade  = 1.0;                       // Risk % if AutoLotMode = true
-input bool                InpEnableTrendLayering  = true;                      // Enable Pyramiding Layering (Up=BUY, Down=SELL)
-input int                 InpMaxLayers            = 5;                         // Max Simultaneous Layers Per Direction
-input int                 InpLayerStepPoints      = 250;                       // Min Favorable Distance to Add Layer (points)
-input double              InpLayerLotMultiplier   = 1.0;                       // Layer Lot Multiplier (1.0 = Fixed 0.01 per layer)
-input bool                InpRequireProfitForLayer= true;                      // Require Previous Layer in Profit
+input bool                InpEnableTrendLayering  = true;                      // Enable Pyramiding Layering
+input int                 InpMaxLayers            = 4;                         // Max Simultaneous Layers Per Direction
+input int                 InpLayerStepPoints      = 400;                       // Min Favorable Step Between Layers (points)
+input double              InpLayerLotMultiplier   = 1.0;                       // Layer Lot Multiplier (1.0 = Fixed 0.01)
 
-input group "=== 4. STOP LOSS (MIN $10 USD/USC) & TRAILING STOP ==="
-input ENUM_SL_MODE        InpStopLossMode         = SL_PERCENT_OF_PRICE;       // Stop Loss Mode
-input double              InpStopLossPercent      = 1.0;                       // Stop Loss Percentage (1.0%)
-input double              InpMinStopLossMoney     = 10.0;                      // Minimum Stop Loss Floor ($10.00 USD/USC)
+input group "=== 4. STOP LOSS ($10 FLOOR) & WIDE BREATHING TRAILING ==="
+input double              InpMinStopLossMoney     = 10.0;                      // Stop Loss Per Position ($10.00 USD/USC)
 input int                 InpFallbackSLPoints     = 1000;                      // Fallback SL Points (1000 pts = $10 @ 0.01 lot)
-input bool                InpEnableBreakEven      = true;                      // Enable Break-Even Stage
-input int                 InpBreakEvenTriggerPts  = 350;                       // Break-Even Trigger (points)
-input int                 InpBreakEvenOffsetPts   = 50;                        // Break-Even Lock Offset (points)
-input bool                InpEnableTrailingStop   = true;                      // Enable Ultra-Responsive Trailing Stop
-input ENUM_TRAILING_MODE  InpTrailingMode         = TRAIL_HIGH_WATERMARK;      // Trailing Stop Algorithm
-input int                 InpTrailingStartPts     = 450;                       // Trailing Activation Profit (points)
-input int                 InpTrailingDistancePts  = 400;                       // Trailing Distance from Peak (points)
-input int                 InpTrailingStepPts      = 10;                        // Min SL Modification Step (points)
-input bool                InpEnableAdaptiveTrail  = true;                      // Volatility-Adaptive Trailing Tightening
-input bool                InpEnableFixedTP        = false;                     // Enable Fixed TP (False = Let Trailing Run)
-input int                 InpFixedTPPoints        = 0;                         // Fixed TP Points (0 = Disabled)
+input bool                InpEnableBreakEven      = false;                     // Enable Early Break-Even (False = No Choking!)
+input int                 InpBreakEvenTriggerPts  = 600;                       // Break-Even Trigger if Enabled (points)
+input int                 InpBreakEvenOffsetPts   = 50;                        // Break-Even Offset (points)
+input bool                InpEnableTrailingStop   = true;                      // Enable Wide Breathing Trailing Stop
+input ENUM_TRAILING_MODE  InpTrailingMode         = TRAIL_ATR_ADAPTIVE;        // Trailing Algorithm (ATR Adaptive)
+input int                 InpTrailingStartPts     = 650;                       // Min Profit Before Trailing Starts (points)
+input int                 InpTrailingDistancePts  = 500;                       // Base Trailing Distance (points)
+input double              InpTrailingATRMult      = 2.2;                       // ATR Multiplier for Trailing Breathing Room
+input int                 InpTrailingStepPts      = 25;                        // Min SL Step Modification (points)
 
-input group "=== 5. RAPID RE-ENTRY SETTINGS ==="
-input bool                InpEnableRapidReentry   = true;                      // Enable Rapid Re-Entry After Trailing Exit
-input int                 InpReentryDelayMs       = 250;                       // Re-entry Cooldown (milliseconds)
-
-input group "=== 6. SAFETY & RISK PROTECTION ==="
-input int                 InpMaxSpreadPoints      = 350;                       // Max Allowed Spread (points)
+input group "=== 5. SAFETY & RISK PROTECTION ==="
+input int                 InpMaxSpreadPoints      = 300;                       // Max Allowed Spread (points)
 input int                 InpMaxSlippagePoints    = 50;                        // Max Slippage (points)
-input double              InpMaxDailyLossPercent  = 25.0;                      // Max Daily Loss (% Balance)
-input double              InpMaxEquityDDPercent   = 35.0;                      // Max Equity Drawdown (% Peak)
+input double              InpMaxDailyLossPercent  = 20.0;                      // Max Daily Loss (% Balance)
+input double              InpMaxEquityDDPercent   = 30.0;                      // Max Equity Drawdown (% Peak)
 input double              InpMaxExposureLots      = 0.10;                      // Max Total Exposure (Lots)
 input double              InpMinFreeMarginPercent = 120.0;                     // Min Free Margin Level (%)
-input int                 InpMaxConsecutiveLosses = 0;                         // Max Consecutive Losses (0 = Disabled)
 
-input group "=== 7. DASHBOARD & VISUALS ==="
+input group "=== 6. DASHBOARD & VISUALS ==="
 input bool                InpShowDashboard        = true;                      // Show Dark Professional Dashboard
 input bool                InpShowTradeVisuals     = true;                      // Show Entry/Exit Arrows & SL Lines
 
@@ -129,7 +107,6 @@ struct TickSample
    long   time_msc;
    double bid;
    double ask;
-   long   volume;
 };
 
 struct PositionTracker
@@ -151,26 +128,31 @@ CSymbolInfo        ExtSym;
 
 string             g_symbol;
 ENUM_EA_STATE      g_state = STATE_INITIALIZING;
-ENUM_MARKET_REGIME g_regime = REGIME_NORMAL_VOLATILITY;
+ENUM_MARKET_REGIME g_regime = REGIME_RANGING_CHOP;
 bool               g_emergency_stop = false;
 bool               g_order_pending = false;
-long               g_last_exit_time_msc = 0;
-long               g_last_entry_time_msc = 0;
+datetime           g_last_exit_time = 0;
+datetime           g_last_entry_time = 0;
 double             g_day_start_balance = 0.0;
 double             g_peak_equity = 0.0;
 int                g_current_day = -1;
-int                g_consec_losses = 0;
 
-// Momentum metrics
+// Indicator Handles
+int                g_h_ema_fast_m1  = INVALID_HANDLE;
+int                g_h_ema_slow_m1  = INVALID_HANDLE;
+int                g_h_atr_m1       = INVALID_HANDLE;
+int                g_h_ema_fast_m15 = INVALID_HANDLE;
+int                g_h_ema_slow_m15 = INVALID_HANDLE;
+int                g_h_ema_200_m15  = INVALID_HANDLE;
+
+// Live metrics
 double             g_velocity_pts_sec = 0.0;
-double             g_accel_pts_sec2   = 0.0;
-double             g_tick_consistency = 0.0;
-double             g_buy_confidence   = 0.0;
-double             g_sell_confidence  = 0.0;
-string             g_momentum_dir     = "NEUTRAL";
+double             g_current_atr_pts  = 0.0;
+string             g_macro_bias       = "NEUTRAL";
+string             g_signal_status    = "WAITING";
 
-// Tick ring buffer
-#define MAX_TICK_BUFFER 512
+// Tick buffer
+#define MAX_TICK_BUFFER 256
 TickSample         g_ticks[MAX_TICK_BUFFER];
 int                g_tick_count = 0;
 
@@ -197,6 +179,20 @@ int OnInit()
       g_state = STATE_RISK_LOCK;
    }
 
+   g_h_ema_fast_m1  = iMA(g_symbol, InpSignalTimeframe, InpFastEMAPeriod,  0, MODE_EMA, PRICE_CLOSE);
+   g_h_ema_slow_m1  = iMA(g_symbol, InpSignalTimeframe, InpSlowEMAPeriod,  0, MODE_EMA, PRICE_CLOSE);
+   g_h_atr_m1       = iATR(g_symbol, InpSignalTimeframe, InpATRPeriod);
+   g_h_ema_fast_m15 = iMA(g_symbol, InpTrendTimeframe,  InpFastEMAPeriod,  0, MODE_EMA, PRICE_CLOSE);
+   g_h_ema_slow_m15 = iMA(g_symbol, InpTrendTimeframe,  InpSlowEMAPeriod,  0, MODE_EMA, PRICE_CLOSE);
+   g_h_ema_200_m15  = iMA(g_symbol, InpTrendTimeframe,  InpTrendEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+
+   if(g_h_ema_fast_m1 == INVALID_HANDLE || g_h_ema_slow_m1 == INVALID_HANDLE || g_h_atr_m1 == INVALID_HANDLE ||
+      g_h_ema_fast_m15 == INVALID_HANDLE || g_h_ema_slow_m15 == INVALID_HANDLE || g_h_ema_200_m15 == INVALID_HANDLE)
+   {
+      Print("[Vulcares Vx] Failed to create indicator handles.");
+      return(INIT_FAILED);
+   }
+
    ExtTrade.SetExpertMagicNumber(InpMagicNumber);
    ExtTrade.SetDeviationInPoints(InpMaxSlippagePoints);
    ExtTrade.SetTypeFillingBySymbol(g_symbol);
@@ -213,11 +209,11 @@ int OnInit()
    if(InpShowDashboard)
       CreateDashboard();
 
-   EventSetMillisecondTimer(100);
+   EventSetMillisecondTimer(150);
    if(g_state != STATE_RISK_LOCK)
       g_state = STATE_SCANNING;
 
-   Print("[Vulcares Vx] Initialized v1.50 | Min SL Floor: ", InpMinStopLossMoney, " ", AccountInfoString(ACCOUNT_CURRENCY));
+   Print("[Vulcares Vx] v2.00 Structural Trend + Pullback Momentum Initialized on ", g_symbol);
    return(INIT_SUCCEEDED);
 }
 
@@ -227,6 +223,12 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   IndicatorRelease(g_h_ema_fast_m1);
+   IndicatorRelease(g_h_ema_slow_m1);
+   IndicatorRelease(g_h_atr_m1);
+   IndicatorRelease(g_h_ema_fast_m15);
+   IndicatorRelease(g_h_ema_slow_m15);
+   IndicatorRelease(g_h_ema_200_m15);
    ObjectsDeleteAll(0, g_prefix);
    ChartRedraw(0);
 }
@@ -282,31 +284,36 @@ void OnTick()
       g_state = STATE_SCANNING;
    }
 
-   AnalyzeMarketRegime();
-   ComputeTickMomentum(tick.time_msc);
-
+   ComputeTickVelocity(tick.time_msc);
    ReconcilePositions();
 
+   // 1. Manage Open Positions with Wide Breathing Trailing Stop
    if(g_tracked_count > 0)
       ManageOpenPositions(tick);
 
    if(!InpTradingEnabled || g_state == STATE_RISK_LOCK || g_order_pending)
       return;
 
-   if(g_last_exit_time_msc > 0 && (tick.time_msc - g_last_exit_time_msc) < InpReentryDelayMs)
-      return;
-
-   if(g_last_entry_time_msc > 0 && (tick.time_msc - g_last_entry_time_msc) < InpReentryDelayMs)
-      return;
-
-   EvaluateEntryAndLayering(tick);
+   // 2. Evaluate Structural Trend + Pullback Momentum Entry & Layering
+   EvaluateStructuralEntryAndLayering(tick);
 
    if(InpShowDashboard && MQLInfoInteger(MQL_VISUAL_MODE))
       UpdateDashboard();
 }
 
 //+------------------------------------------------------------------+
-//| Convert Currency Amount ($10 USD/USC) to Points for Given Lot    |
+//| Helper to Read Single Indicator Value                            |
+//+------------------------------------------------------------------+
+double GetIndVal(int handle, int shift)
+{
+   double buf[1];
+   if(CopyBuffer(handle, 0, shift, 1, buf) <= 0)
+      return 0.0;
+   return buf[0];
+}
+
+//+------------------------------------------------------------------+
+//| Convert $10 USD/USC to Points Using Safe FixedTickValue          |
 //+------------------------------------------------------------------+
 int MoneyToPoints(double money_amount, double lot)
 {
@@ -325,59 +332,77 @@ int MoneyToPoints(double money_amount, double lot)
 }
 
 //+------------------------------------------------------------------+
-//| Calculate Dynamic Stop Loss with Strict Min $10 (USD/USC) Floor  |
+//| Structural Multi-Timeframe Trend & Pullback Entry Engine         |
 //+------------------------------------------------------------------+
-int ComputeDynamicSLPoints(double reference_price, double lot)
+void EvaluateStructuralEntryAndLayering(const MqlTick &tick)
 {
    double point = ExtSym.Point();
-   if(point <= 0.0) return InpFallbackSLPoints;
+   if(point <= 0.0) return;
 
-   long stops_level   = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   int min_broker_pts = (int)(stops_level + 25);
-
-   // Strict $10.00 (USD or USC) minimum stop loss floor in points
-   int min_money_sl_pts = (InpMinStopLossMoney > 0.0) ? MoneyToPoints(InpMinStopLossMoney, lot) : 0;
-
-   int mode_sl_pts = min_money_sl_pts;
-
-   if(InpStopLossMode == SL_PERCENT_OF_PRICE)
-   {
-      double sl_price_dist = reference_price * (InpStopLossPercent / 100.0);
-      mode_sl_pts = (int)MathRound(sl_price_dist / point);
-   }
-   else if(InpStopLossMode == SL_PERCENT_OF_BALANCE)
-   {
-      double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
-      double risk_money = balance * (InpStopLossPercent / 100.0);
-      mode_sl_pts = MoneyToPoints(risk_money, lot);
-   }
-   else if(InpStopLossMode == SL_FIXED_MONEY_ONLY)
-   {
-      mode_sl_pts = min_money_sl_pts;
-   }
-
-   // Enforce that SL distance is NEVER smaller than $10 (USD/USC) equivalent or broker stops_level
-   int final_sl_pts = MathMax(mode_sl_pts, min_money_sl_pts);
-   return MathMax(min_broker_pts, final_sl_pts);
-}
-
-//+------------------------------------------------------------------+
-//| Evaluate Initial Entry & Trend-Following Pyramiding Layering     |
-//+------------------------------------------------------------------+
-void EvaluateEntryAndLayering(const MqlTick &tick)
-{
-   double point = ExtSym.Point();
    long spread_pts = (long)MathRound((tick.ask - tick.bid) / point);
    if(spread_pts > InpMaxSpreadPoints)
+   {
+      g_signal_status = "HIGH SPREAD";
+      return;
+   }
+
+   // Read Multi-Timeframe Indicators
+   double ema21_m1  = GetIndVal(g_h_ema_fast_m1, 0);
+   double ema55_m1  = GetIndVal(g_h_ema_slow_m1, 0);
+   double atr_m1    = GetIndVal(g_h_atr_m1, 1);
+
+   double ema21_m15 = GetIndVal(g_h_ema_fast_m15, 0);
+   double ema55_m15 = GetIndVal(g_h_ema_slow_m15, 0);
+   double ema200_m15= GetIndVal(g_h_ema_200_m15, 0);
+
+   if(ema21_m1 == 0.0 || ema55_m1 == 0.0 || atr_m1 == 0.0 || ema21_m15 == 0.0 || ema200_m15 == 0.0)
       return;
 
-   long stops_level = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   g_current_atr_pts = atr_m1 / point;
 
+   // Volatility Filter: Skip dead sideways chop AND extreme news spikes
+   if(g_current_atr_pts < InpMinATRPoints)
+   {
+      g_regime = REGIME_RANGING_CHOP;
+      g_signal_status = "LOW ATR CHOP";
+      return;
+   }
+   if(g_current_atr_pts > InpMaxATRPoints)
+   {
+      g_regime = REGIME_HIGH_VOLATILITY;
+      g_signal_status = "EXTREME SPIKE";
+      return;
+   }
+
+   // Macro + Micro Trend Alignment
+   bool macro_bull = (tick.bid > ema200_m15) && (ema21_m15 > ema55_m15);
+   bool macro_bear = (tick.bid < ema200_m15) && (ema21_m15 < ema55_m15);
+
+   bool micro_bull = (ema21_m1 > ema55_m1) && (tick.bid > ema21_m1);
+   bool micro_bear = (ema21_m1 < ema55_m1) && (tick.bid < ema21_m1);
+
+   if(macro_bull && micro_bull)
+   {
+      g_macro_bias = "STRONG BULL";
+      g_regime = REGIME_UPTREND_CLEAN;
+   }
+   else if(macro_bear && micro_bear)
+   {
+      g_macro_bias = "STRONG BEAR";
+      g_regime = REGIME_DOWNTREND_CLEAN;
+   }
+   else
+   {
+      g_macro_bias = "CHOP / MIXED";
+      g_regime = REGIME_RANGING_CHOP;
+      g_signal_status = "NO ALIGNMENT";
+      return;
+   }
+
+   // Count active layers
    int buy_layers = 0, sell_layers = 0;
    double highest_buy_entry = -DBL_MAX;
    double lowest_sell_entry = DBL_MAX;
-   double lowest_buy_sl     = DBL_MAX;
-   double highest_sell_sl   = 0.0;
 
    for(int i = 0; i < g_tracked_count; i++)
    {
@@ -386,102 +411,245 @@ void EvaluateEntryAndLayering(const MqlTick &tick)
          buy_layers++;
          if(g_tracked[i].open_price > highest_buy_entry)
             highest_buy_entry = g_tracked[i].open_price;
-         if(g_tracked[i].current_sl > 0.0 && g_tracked[i].current_sl < lowest_buy_sl)
-            lowest_buy_sl = g_tracked[i].current_sl;
       }
       else if(g_tracked[i].type == POSITION_TYPE_SELL)
       {
          sell_layers++;
          if(g_tracked[i].open_price < lowest_sell_entry)
             lowest_sell_entry = g_tracked[i].open_price;
-         if(g_tracked[i].current_sl > highest_sell_sl)
-            highest_sell_sl = g_tracked[i].current_sl;
+      }
+   }
+
+   // Anti-Churn Cooldown when flat
+   datetime now = TimeCurrent();
+   if(buy_layers == 0 && sell_layers == 0 && g_last_exit_time > 0)
+   {
+      if((now - g_last_exit_time) < InpMinCooldownSeconds)
+      {
+         g_signal_status = "COOLDOWN (" + IntegerToString((int)(InpMinCooldownSeconds - (now - g_last_exit_time))) + "s)";
+         return;
       }
    }
 
    bool allow_layering = (InpExecutionMode == MODE_TREND_LAYERING && InpEnableTrendLayering);
    int max_allowed = allow_layering ? MathMax(1, InpMaxLayers) : 1;
 
-   // --- BULLISH MOMENTUM (NAIK -> OPEN BUY / LAYER BUY) ---
-   if(InpEnableBuy && sell_layers == 0 && buy_layers < max_allowed)
-   {
-      bool bullish_signal = (g_buy_confidence >= InpEntryConfidenceMin && g_velocity_pts_sec >= InpTickVelocityThresh);
-      if(bullish_signal)
-      {
-         if(buy_layers == 0)
-         {
-            double lot    = CalculateLayerLot(0);
-            int sl_pts    = ComputeDynamicSLPoints(tick.ask, lot);
-            double sl     = (sl_pts > 0) ? NormalizePrice(tick.ask - sl_pts * point) : 0.0;
-            double tp     = (InpEnableFixedTP && InpFixedTPPoints > 0) ? NormalizePrice(tick.ask + InpFixedTPPoints * point) : 0.0;
+   // Distance from Fast EMA (Anti-Chasing Overextension Filter)
+   double dist_from_ema21 = MathAbs(tick.bid - ema21_m1);
+   bool not_overextended = (dist_from_ema21 <= atr_m1 * InpMaxEMADistATR);
 
-            if(ExecuteMarketOrder(ORDER_TYPE_BUY, lot, tick.ask, sl, tp, "VulcaresVx_BUY_L1"))
+   // M1 Running Candle Confirmation
+   double open0  = iOpen(g_symbol, InpSignalTimeframe, 0);
+   double low0   = iLow(g_symbol, InpSignalTimeframe, 0);
+   double high0  = iHigh(g_symbol, InpSignalTimeframe, 0);
+
+   long stops_level = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
+
+   // =================================================================
+   // BULLISH ENTRY & PYRAMIDING LAYERING (Trend Up + Pullback Bounce)
+   // =================================================================
+   if(InpEnableBuy && macro_bull && micro_bull && sell_layers == 0 && buy_layers < max_allowed)
+   {
+      bool candle_bullish = (tick.bid > open0) && (low0 <= ema21_m1 + atr_m1 * 0.5);
+      bool tick_impulse   = (g_velocity_pts_sec >= InpTickVelocityThresh);
+
+      if(buy_layers == 0)
+      {
+         if(not_overextended && candle_bullish && tick_impulse)
+         {
+            double lot = CalculateLayerLot(0);
+            int sl_pts = (int)MathMax((double)(stops_level + 25), (double)MoneyToPoints(InpMinStopLossMoney, lot));
+            double sl  = NormalizePrice(tick.ask - sl_pts * point);
+
+            g_signal_status = "BUY TRIGGER";
+            if(ExecuteMarketOrder(ORDER_TYPE_BUY, lot, tick.ask, sl, 0.0, "VulcaresVx_BUY_L1"))
             {
-               g_last_entry_time_msc = tick.time_msc;
+               g_last_entry_time = now;
                g_state = STATE_ENTRY_PENDING;
             }
          }
-         else if(allow_layering)
+         else
          {
-            double step_dist_pts = (tick.ask - highest_buy_entry) / point;
-            bool profit_ok = (!InpRequireProfitForLayer) || (tick.bid > highest_buy_entry);
+            g_signal_status = not_overextended ? "WAIT BOUNCE" : "OVEREXTENDED";
+         }
+      }
+      else if(allow_layering)
+      {
+         double step_pts = (tick.ask - highest_buy_entry) / point;
+         if(step_pts >= InpLayerStepPoints && tick_impulse && (now - g_last_entry_time) >= 15)
+         {
+            double lot = CalculateLayerLot(buy_layers);
+            int sl_pts = (int)MathMax((double)(stops_level + 25), (double)MoneyToPoints(InpMinStopLossMoney, lot));
+            double sl  = NormalizePrice(tick.ask - sl_pts * point);
 
-            if(step_dist_pts >= InpLayerStepPoints && profit_ok)
+            string cmt = "VulcaresVx_BUY_L" + IntegerToString(buy_layers + 1);
+            if(ExecuteMarketOrder(ORDER_TYPE_BUY, lot, tick.ask, sl, 0.0, cmt))
             {
-               double lot    = CalculateLayerLot(buy_layers);
-               int sl_pts    = ComputeDynamicSLPoints(tick.ask, lot);
-               double sl     = (sl_pts > 0) ? NormalizePrice(tick.ask - sl_pts * point) : 0.0;
-               if(lowest_buy_sl < DBL_MAX && lowest_buy_sl > sl && (tick.bid - lowest_buy_sl) >= (stops_level + 15) * point)
-                  sl = lowest_buy_sl;
-
-               string cmt = "VulcaresVx_BUY_L" + IntegerToString(buy_layers + 1);
-               if(ExecuteMarketOrder(ORDER_TYPE_BUY, lot, tick.ask, sl, 0.0, cmt))
-               {
-                  g_last_entry_time_msc = tick.time_msc;
-                  g_state = STATE_LAYERING_ACTIVE;
-               }
+               g_last_entry_time = now;
+               g_state = STATE_LAYERING_ACTIVE;
             }
          }
       }
    }
 
-   // --- BEARISH MOMENTUM (TURUN -> OPEN SELL / LAYER SELL) ---
-   if(InpEnableSell && buy_layers == 0 && sell_layers < max_allowed)
+   // =================================================================
+   // BEARISH ENTRY & PYRAMIDING LAYERING (Trend Down + Pullback Drop)
+   // =================================================================
+   if(InpEnableSell && macro_bear && micro_bear && buy_layers == 0 && sell_layers < max_allowed)
    {
-      bool bearish_signal = (g_sell_confidence >= InpEntryConfidenceMin && -g_velocity_pts_sec >= InpTickVelocityThresh);
-      if(bearish_signal)
-      {
-         if(sell_layers == 0)
-         {
-            double lot    = CalculateLayerLot(0);
-            int sl_pts    = ComputeDynamicSLPoints(tick.bid, lot);
-            double sl     = (sl_pts > 0) ? NormalizePrice(tick.bid + sl_pts * point) : 0.0;
-            double tp     = (InpEnableFixedTP && InpFixedTPPoints > 0) ? NormalizePrice(tick.bid - InpFixedTPPoints * point) : 0.0;
+      bool candle_bearish = (tick.bid < open0) && (high0 >= ema21_m1 - atr_m1 * 0.5);
+      bool tick_impulse   = (-g_velocity_pts_sec >= InpTickVelocityThresh);
 
-            if(ExecuteMarketOrder(ORDER_TYPE_SELL, lot, tick.bid, sl, tp, "VulcaresVx_SELL_L1"))
+      if(sell_layers == 0)
+      {
+         if(not_overextended && candle_bearish && tick_impulse)
+         {
+            double lot = CalculateLayerLot(0);
+            int sl_pts = (int)MathMax((double)(stops_level + 25), (double)MoneyToPoints(InpMinStopLossMoney, lot));
+            double sl  = NormalizePrice(tick.bid + sl_pts * point);
+
+            g_signal_status = "SELL TRIGGER";
+            if(ExecuteMarketOrder(ORDER_TYPE_SELL, lot, tick.bid, sl, 0.0, "VulcaresVx_SELL_L1"))
             {
-               g_last_entry_time_msc = tick.time_msc;
+               g_last_entry_time = now;
                g_state = STATE_ENTRY_PENDING;
             }
          }
-         else if(allow_layering)
+         else
          {
-            double step_dist_pts = (lowest_sell_entry - tick.bid) / point;
-            bool profit_ok = (!InpRequireProfitForLayer) || (tick.ask < lowest_sell_entry);
+            g_signal_status = not_overextended ? "WAIT PULLBACK" : "OVEREXTENDED";
+         }
+      }
+      else if(allow_layering)
+      {
+         double step_pts = (lowest_sell_entry - tick.bid) / point;
+         if(step_pts >= InpLayerStepPoints && tick_impulse && (now - g_last_entry_time) >= 15)
+         {
+            double lot = CalculateLayerLot(sell_layers);
+            int sl_pts = (int)MathMax((double)(stops_level + 25), (double)MoneyToPoints(InpMinStopLossMoney, lot));
+            double sl  = NormalizePrice(tick.bid + sl_pts * point);
 
-            if(step_dist_pts >= InpLayerStepPoints && profit_ok)
+            string cmt = "VulcaresVx_SELL_L" + IntegerToString(sell_layers + 1);
+            if(ExecuteMarketOrder(ORDER_TYPE_SELL, lot, tick.bid, sl, 0.0, cmt))
             {
-               double lot    = CalculateLayerLot(sell_layers);
-               int sl_pts    = ComputeDynamicSLPoints(tick.bid, lot);
-               double sl     = (sl_pts > 0) ? NormalizePrice(tick.bid + sl_pts * point) : 0.0;
-               if(highest_sell_sl > 0.0 && highest_sell_sl < sl && (highest_sell_sl - tick.ask) >= (stops_level + 15) * point)
-                  sl = highest_sell_sl;
+               g_last_entry_time = now;
+               g_state = STATE_LAYERING_ACTIVE;
+            }
+         }
+      }
+   }
+}
 
-               string cmt = "VulcaresVx_SELL_L" + IntegerToString(sell_layers + 1);
-               if(ExecuteMarketOrder(ORDER_TYPE_SELL, lot, tick.bid, sl, 0.0, cmt))
+//+------------------------------------------------------------------+
+//| Wide Breathing Trailing Stop Engine (Lets Winners Run!)          |
+//+------------------------------------------------------------------+
+void ManageOpenPositions(const MqlTick &tick)
+{
+   double point = ExtSym.Point();
+   if(point <= 0.0) return;
+
+   long stops_level  = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   long freeze_level = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+   double min_stop_dist = MathMax((double)stops_level, 15.0) * point;
+   double freeze_dist   = (double)freeze_level * point;
+
+   double trail_dist_pts = (double)InpTrailingDistancePts;
+   if(InpTrailingMode == TRAIL_ATR_ADAPTIVE && g_current_atr_pts > 0.0)
+   {
+      trail_dist_pts = MathMax((double)InpTrailingDistancePts, g_current_atr_pts * InpTrailingATRMult);
+   }
+
+   for(int i = 0; i < g_tracked_count; i++)
+   {
+      ulong ticket = g_tracked[i].ticket;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      int    pos_type   = (int)PositionGetInteger(POSITION_TYPE);
+      double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+      double current_sl = PositionGetDouble(POSITION_SL);
+      double current_tp = PositionGetDouble(POSITION_TP);
+
+      if(pos_type == POSITION_TYPE_BUY)
+      {
+         if(tick.bid > g_tracked[i].highest_bid)
+            g_tracked[i].highest_bid = tick.bid;
+
+         double peak_profit_pts = (g_tracked[i].highest_bid - open_price) / point;
+         double candidate_sl    = current_sl;
+
+         if(InpEnableBreakEven && peak_profit_pts >= InpBreakEvenTriggerPts)
+         {
+            double be_sl = NormalizePrice(open_price + InpBreakEvenOffsetPts * point);
+            if(candidate_sl == 0.0 || be_sl > candidate_sl)
+               candidate_sl = be_sl;
+         }
+
+         if(InpEnableTrailingStop && peak_profit_pts >= InpTrailingStartPts)
+         {
+            double trail_sl = NormalizePrice(g_tracked[i].highest_bid - trail_dist_pts * point);
+            if(candidate_sl == 0.0 || trail_sl > candidate_sl)
+            {
+               candidate_sl = trail_sl;
+               g_state = STATE_TRAILING_ACTIVE;
+            }
+         }
+
+         bool sl_improved = (current_sl == 0.0 && candidate_sl > 0.0) ||
+                            (candidate_sl >= current_sl + InpTrailingStepPts * point);
+
+         if(sl_improved && candidate_sl > 0.0)
+         {
+            if((tick.bid - candidate_sl) >= min_stop_dist &&
+               (current_sl == 0.0 || MathAbs(tick.bid - current_sl) > freeze_dist))
+            {
+               if(ModifyPositionSL(ticket, candidate_sl, current_tp))
                {
-                  g_last_entry_time_msc = tick.time_msc;
-                  g_state = STATE_LAYERING_ACTIVE;
+                  g_tracked[i].current_sl = candidate_sl;
+                  if(InpShowTradeVisuals)
+                     DrawTrailingLine(ticket, candidate_sl);
+               }
+            }
+         }
+      }
+      else if(pos_type == POSITION_TYPE_SELL)
+      {
+         if(tick.ask < g_tracked[i].lowest_ask || g_tracked[i].lowest_ask == 0.0)
+            g_tracked[i].lowest_ask = tick.ask;
+
+         double peak_profit_pts = (open_price - g_tracked[i].lowest_ask) / point;
+         double candidate_sl    = current_sl;
+
+         if(InpEnableBreakEven && peak_profit_pts >= InpBreakEvenTriggerPts)
+         {
+            double be_sl = NormalizePrice(open_price - InpBreakEvenOffsetPts * point);
+            if(candidate_sl == 0.0 || be_sl < candidate_sl)
+               candidate_sl = be_sl;
+         }
+
+         if(InpEnableTrailingStop && peak_profit_pts >= InpTrailingStartPts)
+         {
+            double trail_sl = NormalizePrice(g_tracked[i].lowest_ask + trail_dist_pts * point);
+            if(candidate_sl == 0.0 || trail_sl < candidate_sl)
+            {
+               candidate_sl = trail_sl;
+               g_state = STATE_TRAILING_ACTIVE;
+            }
+         }
+
+         bool sl_improved = (current_sl == 0.0 && candidate_sl > 0.0) ||
+                            (candidate_sl <= current_sl - InpTrailingStepPts * point);
+
+         if(sl_improved && candidate_sl > 0.0)
+         {
+            if((candidate_sl - tick.ask) >= min_stop_dist &&
+               (current_sl == 0.0 || MathAbs(current_sl - tick.ask) > freeze_dist))
+            {
+               if(ModifyPositionSL(ticket, candidate_sl, current_tp))
+               {
+                  g_tracked[i].current_sl = candidate_sl;
+                  if(InpShowTradeVisuals)
+                     DrawTrailingLine(ticket, candidate_sl);
                }
             }
          }
@@ -516,13 +684,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) +
                                HistoryDealGetDouble(trans.deal, DEAL_SWAP) +
                                HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
-               if(profit < 0.0)
-                  g_consec_losses++;
-               else if(profit > 0.0)
-                  g_consec_losses = 0;
-
-               g_last_exit_time_msc = (long)TimeCurrent() * 1000;
-               g_state = STATE_RE_ENTRY_SCANNING;
+               g_last_exit_time = TimeCurrent();
+               g_state = STATE_SCANNING;
 
                if(InpShowTradeVisuals)
                   DrawExitMarker(trans.deal, price, profit);
@@ -561,7 +724,6 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
          }
          else
          {
-            g_consec_losses = 0;
             g_day_start_balance = AccountInfoDouble(ACCOUNT_BALANCE);
             g_peak_equity = AccountInfoDouble(ACCOUNT_EQUITY);
             g_state = STATE_SCANNING;
@@ -572,7 +734,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 }
 
 //+------------------------------------------------------------------+
-//| Push Tick into Circular Buffer                                   |
+//| Push Tick & Compute Net Velocity                                 |
 //+------------------------------------------------------------------+
 void PushTick(const MqlTick &tick)
 {
@@ -581,7 +743,6 @@ void PushTick(const MqlTick &tick)
       g_ticks[g_tick_count].time_msc = tick.time_msc;
       g_ticks[g_tick_count].bid      = tick.bid;
       g_ticks[g_tick_count].ask      = tick.ask;
-      g_ticks[g_tick_count].volume   = (long)tick.volume;
       g_tick_count++;
    }
    else
@@ -592,297 +753,41 @@ void PushTick(const MqlTick &tick)
       g_ticks[MAX_TICK_BUFFER - 1].time_msc = tick.time_msc;
       g_ticks[MAX_TICK_BUFFER - 1].bid      = tick.bid;
       g_ticks[MAX_TICK_BUFFER - 1].ask      = tick.ask;
-      g_ticks[MAX_TICK_BUFFER - 1].volume   = (long)tick.volume;
    }
 }
 
-//+------------------------------------------------------------------+
-//| Real-Time Multi-Window Tick Momentum & Confidence Engine         |
-//+------------------------------------------------------------------+
-void ComputeTickMomentum(long now_msc)
+void ComputeTickVelocity(long now_msc)
 {
    g_velocity_pts_sec = 0.0;
-   g_accel_pts_sec2   = 0.0;
-   g_tick_consistency = 0.0;
-   g_buy_confidence   = 0.0;
-   g_sell_confidence  = 0.0;
-
-   if(g_tick_count < 4)
-      return;
+   if(g_tick_count < 3) return;
 
    double point = ExtSym.Point();
    if(point <= 0.0) return;
 
    long window_start = now_msc - InpMomentumWindowMs;
-   long half_window  = now_msc - (InpMomentumWindowMs / 2);
-
    int first_idx = -1;
-   int mid_idx   = -1;
    int last_idx  = g_tick_count - 1;
-
-   int up_ticks = 0;
-   int down_ticks = 0;
 
    for(int i = 0; i < g_tick_count; i++)
    {
       if(g_ticks[i].time_msc >= window_start)
       {
-         if(first_idx == -1) first_idx = i;
-         if(mid_idx == -1 && g_ticks[i].time_msc >= half_window) mid_idx = i;
-
-         if(i > first_idx)
-         {
-            double diff = g_ticks[i].bid - g_ticks[i - 1].bid;
-            if(diff > 0.0) up_ticks++;
-            else if(diff < 0.0) down_ticks++;
-         }
+         first_idx = i;
+         break;
       }
    }
 
-   if(first_idx == -1 || first_idx >= last_idx)
-      return;
+   if(first_idx == -1 || first_idx >= last_idx) return;
 
-   double dt_total = (double)(g_ticks[last_idx].time_msc - g_ticks[first_idx].time_msc) / 1000.0;
-   if(dt_total <= 0.05) dt_total = 0.05;
+   double dt = (double)(g_ticks[last_idx].time_msc - g_ticks[first_idx].time_msc) / 1000.0;
+   if(dt <= 0.05) dt = 0.05;
 
-   double net_pts = (g_ticks[last_idx].bid - g_ticks[first_idx].bid) / point;
-   g_velocity_pts_sec = net_pts / dt_total;
-
-   if(mid_idx > first_idx && mid_idx < last_idx)
-   {
-      double dt1 = MathMax(0.025, (double)(g_ticks[mid_idx].time_msc - g_ticks[first_idx].time_msc) / 1000.0);
-      double dt2 = MathMax(0.025, (double)(g_ticks[last_idx].time_msc - g_ticks[mid_idx].time_msc) / 1000.0);
-      double v1  = ((g_ticks[mid_idx].bid - g_ticks[first_idx].bid) / point) / dt1;
-      double v2  = ((g_ticks[last_idx].bid - g_ticks[mid_idx].bid) / point) / dt2;
-      g_accel_pts_sec2 = (v2 - v1) / ((dt1 + dt2) * 0.5);
-   }
-
-   int total_moves = up_ticks + down_ticks;
-   double bull_ratio = (total_moves > 0) ? (double)up_ticks / total_moves : 0.0;
-   double bear_ratio = (total_moves > 0) ? (double)down_ticks / total_moves : 0.0;
-
-   double open0  = iOpen(g_symbol, InpSignalTimeframe, 0);
-   double close0 = g_ticks[last_idx].bid;
-
-   double highest_prev = -DBL_MAX;
-   double lowest_prev  = DBL_MAX;
-   for(int b = 1; b <= InpBreakoutLookbackBars; b++)
-   {
-      highest_prev = MathMax(highest_prev, iHigh(g_symbol, InpSignalTimeframe, b));
-      lowest_prev  = MathMin(lowest_prev,  iLow(g_symbol, InpSignalTimeframe, b));
-   }
-
-   // BUY Confidence Calculation (0 - 100)
-   double buy_score = 0.0;
-   if(g_velocity_pts_sec >= InpTickVelocityThresh)
-      buy_score += MathMin(35.0, (g_velocity_pts_sec / InpTickVelocityThresh) * 20.0);
-   if(g_accel_pts_sec2 >= InpAccelerationThresh)
-      buy_score += MathMin(20.0, (g_accel_pts_sec2 / MathMax(1.0, InpAccelerationThresh)) * 12.0);
-   if(bull_ratio >= InpTickConsistencyMin)
-      buy_score += 20.0 * bull_ratio;
-   if(close0 > open0)
-      buy_score += 10.0;
-   if(close0 > highest_prev - InpBreakoutSensitivity * point)
-      buy_score += 15.0;
-
-   // SELL Confidence Calculation (0 - 100)
-   double sell_score = 0.0;
-   if(-g_velocity_pts_sec >= InpTickVelocityThresh)
-      sell_score += MathMin(35.0, (-g_velocity_pts_sec / InpTickVelocityThresh) * 20.0);
-   if(-g_accel_pts_sec2 >= InpAccelerationThresh)
-      sell_score += MathMin(20.0, (-g_accel_pts_sec2 / MathMax(1.0, InpAccelerationThresh)) * 12.0);
-   if(bear_ratio >= InpTickConsistencyMin)
-      sell_score += 20.0 * bear_ratio;
-   if(close0 < open0)
-      sell_score += 10.0;
-   if(close0 < lowest_prev + InpBreakoutSensitivity * point)
-      sell_score += 15.0;
-
-   g_buy_confidence  = MathMin(100.0, buy_score);
-   g_sell_confidence = MathMin(100.0, sell_score);
-
-   if(g_buy_confidence > g_sell_confidence && g_buy_confidence >= 40.0)
-   {
-      g_momentum_dir = "BULLISH";
-      g_tick_consistency = bull_ratio;
-   }
-   else if(g_sell_confidence > g_buy_confidence && g_sell_confidence >= 40.0)
-   {
-      g_momentum_dir = "BEARISH";
-      g_tick_consistency = bear_ratio;
-   }
-   else
-   {
-      g_momentum_dir = "NEUTRAL";
-      g_tick_consistency = MathMax(bull_ratio, bear_ratio);
-   }
+   g_velocity_pts_sec = ((g_ticks[last_idx].bid - g_ticks[first_idx].bid) / point) / dt;
 }
 
 //+------------------------------------------------------------------+
-//| Market Volatility Classification                                 |
+//| Reconcile Active Positions                                       |
 //+------------------------------------------------------------------+
-void AnalyzeMarketRegime()
-{
-   double point = ExtSym.Point();
-   if(point <= 0.0) return;
-
-   double r0 = (iHigh(g_symbol, InpSignalTimeframe, 0) - iLow(g_symbol, InpSignalTimeframe, 0)) / point;
-   double r1 = (iHigh(g_symbol, InpSignalTimeframe, 1) - iLow(g_symbol, InpSignalTimeframe, 1)) / point;
-   double r2 = (iHigh(g_symbol, InpSignalTimeframe, 2) - iLow(g_symbol, InpSignalTimeframe, 2)) / point;
-   double avg_range = (r1 + r2) * 0.5;
-
-   if(avg_range < 50.0 && r0 < 40.0)
-      g_regime = REGIME_DORMANT;
-   else if(avg_range < 150.0)
-      g_regime = REGIME_LOW_VOLATILITY;
-   else if(r0 > avg_range * 2.2)
-      g_regime = REGIME_IMPULSE_BREAKOUT;
-   else if(avg_range > 800.0)
-      g_regime = REGIME_EXTREME_VOLATILITY;
-   else if(avg_range > 400.0)
-      g_regime = REGIME_HIGH_VOLATILITY;
-   else
-      g_regime = REGIME_NORMAL_VOLATILITY;
-}
-
-//+------------------------------------------------------------------+
-//| Ultra-Responsive Multi-Stage Trailing Stop Engine                |
-//+------------------------------------------------------------------+
-void ManageOpenPositions(const MqlTick &tick)
-{
-   double point = ExtSym.Point();
-   if(point <= 0.0) return;
-
-   long stops_level  = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   long freeze_level = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_FREEZE_LEVEL);
-   double min_stop_dist = MathMax((double)stops_level, 10.0) * point;
-   double freeze_dist   = (double)freeze_level * point;
-
-   for(int i = 0; i < g_tracked_count; i++)
-   {
-      ulong ticket = g_tracked[i].ticket;
-      if(!PositionSelectByTicket(ticket))
-         continue;
-
-      int    pos_type   = (int)PositionGetInteger(POSITION_TYPE);
-      double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
-      double current_sl = PositionGetDouble(POSITION_SL);
-      double current_tp = PositionGetDouble(POSITION_TP);
-
-      if(pos_type == POSITION_TYPE_BUY)
-      {
-         if(tick.bid > g_tracked[i].highest_bid)
-            g_tracked[i].highest_bid = tick.bid;
-
-         double peak_profit_pts = (g_tracked[i].highest_bid - open_price) / point;
-         double candidate_sl    = current_sl;
-
-         if(InpEnableBreakEven && peak_profit_pts >= InpBreakEvenTriggerPts)
-         {
-            double be_sl = NormalizePrice(open_price + InpBreakEvenOffsetPts * point);
-            if(candidate_sl == 0.0 || be_sl > candidate_sl)
-            {
-               candidate_sl = be_sl;
-               g_state = STATE_BREAK_EVEN_ACTIVE;
-            }
-         }
-
-         if(InpEnableTrailingStop && peak_profit_pts >= InpTrailingStartPts)
-         {
-            double eff_trail_dist = ComputeEffectiveTrailingDistance(peak_profit_pts) * point;
-            double trail_sl = NormalizePrice(g_tracked[i].highest_bid - eff_trail_dist);
-
-            if(candidate_sl == 0.0 || trail_sl > candidate_sl)
-            {
-               candidate_sl = trail_sl;
-               g_state = STATE_TRAILING_ACTIVE;
-            }
-         }
-
-         bool sl_improved = (current_sl == 0.0 && candidate_sl > 0.0) ||
-                            (candidate_sl >= current_sl + InpTrailingStepPts * point);
-
-         if(sl_improved && candidate_sl > 0.0)
-         {
-            if((tick.bid - candidate_sl) >= min_stop_dist &&
-               (current_sl == 0.0 || MathAbs(tick.bid - current_sl) > freeze_dist))
-            {
-               if(ModifyPositionSL(ticket, candidate_sl, current_tp))
-               {
-                  g_tracked[i].current_sl = candidate_sl;
-                  if(InpShowTradeVisuals)
-                     DrawTrailingLine(ticket, candidate_sl);
-               }
-            }
-         }
-      }
-      else if(pos_type == POSITION_TYPE_SELL)
-      {
-         if(tick.ask < g_tracked[i].lowest_ask || g_tracked[i].lowest_ask == 0.0)
-            g_tracked[i].lowest_ask = tick.ask;
-
-         double peak_profit_pts = (open_price - g_tracked[i].lowest_ask) / point;
-         double candidate_sl    = current_sl;
-
-         if(InpEnableBreakEven && peak_profit_pts >= InpBreakEvenTriggerPts)
-         {
-            double be_sl = NormalizePrice(open_price - InpBreakEvenOffsetPts * point);
-            if(candidate_sl == 0.0 || be_sl < candidate_sl)
-            {
-               candidate_sl = be_sl;
-               g_state = STATE_BREAK_EVEN_ACTIVE;
-            }
-         }
-
-         if(InpEnableTrailingStop && peak_profit_pts >= InpTrailingStartPts)
-         {
-            double eff_trail_dist = ComputeEffectiveTrailingDistance(peak_profit_pts) * point;
-            double trail_sl = NormalizePrice(g_tracked[i].lowest_ask + eff_trail_dist);
-
-            if(candidate_sl == 0.0 || trail_sl < candidate_sl)
-            {
-               candidate_sl = trail_sl;
-               g_state = STATE_TRAILING_ACTIVE;
-            }
-         }
-
-         bool sl_improved = (current_sl == 0.0 && candidate_sl > 0.0) ||
-                            (candidate_sl <= current_sl - InpTrailingStepPts * point);
-
-         if(sl_improved && candidate_sl > 0.0)
-         {
-            if((candidate_sl - tick.ask) >= min_stop_dist &&
-               (current_sl == 0.0 || MathAbs(current_sl - tick.ask) > freeze_dist))
-            {
-               if(ModifyPositionSL(ticket, candidate_sl, current_tp))
-               {
-                  g_tracked[i].current_sl = candidate_sl;
-                  if(InpShowTradeVisuals)
-                     DrawTrailingLine(ticket, candidate_sl);
-               }
-            }
-         }
-      }
-   }
-}
-
-double ComputeEffectiveTrailingDistance(double peak_profit_pts)
-{
-   double dist = (double)InpTrailingDistancePts;
-
-   if(InpTrailingMode == TRAIL_ATR_ADAPTIVE)
-   {
-      double r1 = (iHigh(g_symbol, InpSignalTimeframe, 1) - iLow(g_symbol, InpSignalTimeframe, 1)) / ExtSym.Point();
-      if(r1 > 0.0)
-         dist = MathMax(50.0, MathMin(1500.0, r1 * 0.65));
-   }
-
-   if(InpEnableAdaptiveTrail && peak_profit_pts > InpTrailingDistancePts * 2.5)
-      dist *= 0.75;
-
-   return MathMax(50.0, dist);
-}
-
 void ReconcilePositions()
 {
    PositionTracker updated[20];
@@ -981,7 +886,6 @@ void CheckDailyReset()
       g_current_day = dt.day_of_year;
       g_day_start_balance = AccountInfoDouble(ACCOUNT_BALANCE);
       g_peak_equity       = AccountInfoDouble(ACCOUNT_EQUITY);
-      g_consec_losses     = 0;
       if(g_state == STATE_RISK_LOCK && !g_emergency_stop)
          g_state = STATE_SCANNING;
    }
@@ -1015,9 +919,6 @@ bool CheckRiskGuards()
          return false;
    }
 
-   if(InpMaxConsecutiveLosses > 0 && g_consec_losses >= InpMaxConsecutiveLosses)
-      return false;
-
    return true;
 }
 
@@ -1040,26 +941,8 @@ void CloseAllEA_Positions(string reason)
 
 double CalculateLayerLot(int layer_index)
 {
-   double base = InpBaseLot;
-
-   if(InpAutoLotMode && InpRiskPercentPerTrade > 0.0)
-   {
-      double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
-      double risk_money = MathMax(InpMinStopLossMoney, balance * (InpRiskPercentPerTrade / 100.0));
-      double tick_val   = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
-      double tick_sz    = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
-      double point      = ExtSym.Point();
-      int sl_pts        = ComputeDynamicSLPoints(ExtSym.Bid(), InpBaseLot);
-
-      if(tick_val > 0.0 && tick_sz > 0.0 && point > 0.0 && sl_pts > 0)
-      {
-         double pt_val = tick_val * (point / tick_sz);
-         base = risk_money / (sl_pts * pt_val);
-      }
-   }
-
    double mult = MathPow(MathMax(0.1, InpLayerLotMultiplier), layer_index);
-   return NormalizeLot(base * mult);
+   return NormalizeLot(InpBaseLot * mult);
 }
 
 double NormalizeLot(double lot)
@@ -1132,13 +1015,13 @@ void CreateDashboard()
    ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
    ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
 
-   CreateLabel("TITLE", x + 12, y + 10, "VULCARES VX  |  TREND LAYERING", clrGold, 10, true);
-   CreateLabel("SUB",   x + 12, y + 28, "Min SL $10 (USD/USC) + Layering + Trail", clrDarkGray, 8, false);
+   CreateLabel("TITLE", x + 12, y + 10, "VULCARES VX v2.0  |  STRUCTURAL", clrGold, 10, true);
+   CreateLabel("SUB",   x + 12, y + 28, "MTF EMA Trend + Pullback + Wide Trail", clrDarkGray, 8, false);
 
    string keys[] = {
-      "EA Status:", "Market Regime:", "Momentum Dir:", "Tick Velocity:",
-      "BUY Confidence:", "SELL Confidence:", "Active Layers:", "Total Active Lot:",
-      "SL Floor ($10):", "Floating P/L:", "Trailing Status:", "Tightest SL:",
+      "EA Status:", "Market Regime:", "Macro M15 Bias:", "Signal Gate:",
+      "Tick Velocity:", "M1 ATR (Pts):", "Active Layers:", "Total Active Lot:",
+      "SL ($10 Floor):", "Floating P/L:", "Trailing Status:", "Tightest SL:",
       "Locked Profit:", "Current Spread:", "Daily P/L:", "Actual Win Rate:"
    };
 
@@ -1205,7 +1088,7 @@ void UpdateDashboard()
       }
    }
 
-   int cur_sl_pts  = ComputeDynamicSLPoints(ExtSym.Bid(), InpBaseLot);
+   int sl_pts_10   = MoneyToPoints(InpMinStopLossMoney, InpBaseLot);
    double daily_pl = AccountInfoDouble(ACCOUNT_EQUITY) - g_day_start_balance;
    long spread_pts = (point > 0.0) ? (long)MathRound((ExtSym.Ask() - ExtSym.Bid()) / point) : 0;
 
@@ -1233,15 +1116,15 @@ void UpdateDashboard()
 
    SetVal(0, state_str, (g_state == STATE_RISK_LOCK || g_state == STATE_EMERGENCY_STOP) ? clrRed : clrLimeGreen);
    SetVal(1, reg_str, clrDeepSkyBlue);
-   SetVal(2, g_momentum_dir, (g_momentum_dir == "BULLISH") ? clrLime : (g_momentum_dir == "BEARISH" ? clrTomato : clrGray));
-   SetVal(3, DoubleToString(g_velocity_pts_sec, 1) + " pts/s", clrWhite);
-   SetVal(4, DoubleToString(g_buy_confidence, 1) + "%", (g_buy_confidence >= InpEntryConfidenceMin) ? clrLime : clrSilver);
-   SetVal(5, DoubleToString(g_sell_confidence, 1) + "%", (g_sell_confidence >= InpEntryConfidenceMin) ? clrTomato : clrSilver);
+   SetVal(2, g_macro_bias, (g_macro_bias == "STRONG BULL") ? clrLime : (g_macro_bias == "STRONG BEAR" ? clrTomato : clrGray));
+   SetVal(3, g_signal_status, clrGold);
+   SetVal(4, DoubleToString(g_velocity_pts_sec, 1) + " pts/s", clrWhite);
+   SetVal(5, DoubleToString(g_current_atr_pts, 0) + " pts", clrSilver);
    SetVal(6, IntegerToString(g_tracked_count) + " / " + IntegerToString(InpMaxLayers), clrWhite);
    SetVal(7, DoubleToString(total_lot, 2) + " lot", clrWhite);
-   SetVal(8, "Min " + DoubleToString(InpMinStopLossMoney, 0) + " " + AccountInfoString(ACCOUNT_CURRENCY) + " (" + IntegerToString(cur_sl_pts) + " pts)", clrGold);
+   SetVal(8, DoubleToString(InpMinStopLossMoney, 0) + " " + AccountInfoString(ACCOUNT_CURRENCY) + " (" + IntegerToString(sl_pts_10) + " pts)", clrGold);
    SetVal(9, DoubleToString(float_pl, 2) + " " + AccountInfoString(ACCOUNT_CURRENCY), (float_pl >= 0.0) ? clrLime : clrTomato);
-   SetVal(10, (g_state == STATE_TRAILING_ACTIVE) ? "TRAILING LOCK" : ((g_tracked_count > 0) ? "ARMED" : "IDLE"), clrGold);
+   SetVal(10, (g_state == STATE_TRAILING_ACTIVE) ? "ATR TRAILING" : ((g_tracked_count > 0) ? "ARMED" : "IDLE"), clrGold);
    SetVal(11, (tight_sl > 0.0) ? DoubleToString(tight_sl, digits) : "NONE", clrCrimson);
    SetVal(12, "+" + DoubleToString(locked_pl, 0) + " pts", (locked_pl > 0.0) ? clrLime : clrGray);
    SetVal(13, IntegerToString(spread_pts) + " pts", (spread_pts <= InpMaxSpreadPoints) ? clrSilver : clrRed);
