@@ -1,5 +1,5 @@
 #property strict
-#property version "1.01"
+#property version "1.02"
 #property description "Quantum Trading Engine | Strategy Tester and demo"
 
 #include <Trade/Trade.mqh>
@@ -198,15 +198,18 @@ void AddMarket(const string symbol)
       if(markets[i].symbol==symbol)
          return;
 
-   if(!SymbolSelect(symbol,true))
+   if(symbol!=_Symbol && !SymbolSelect(symbol,true))
    {
       Print("QTE: could not select ",symbol);
       return;
    }
 
+   // The chart/tester symbol is already bound by MT5. Entry checks
+   // in MakePlan still enforce its current trading mode.
    long mode=0;
-   if(!SymbolInfoInteger(symbol,SYMBOL_TRADE_MODE,mode) ||
-      mode==SYMBOL_TRADE_MODE_DISABLED || mode==SYMBOL_TRADE_MODE_CLOSEONLY)
+   if(symbol!=_Symbol &&
+      (!SymbolInfoInteger(symbol,SYMBOL_TRADE_MODE,mode) ||
+       mode==SYMBOL_TRADE_MODE_DISABLED || mode==SYMBOL_TRADE_MODE_CLOSEONLY))
       return;
 
    if(ArrayResize(markets,count+1,128)!=count+1)
@@ -1330,15 +1333,37 @@ void HandleButton(const string key)
 int OnInit()
 {
    tester=(bool)MQLInfoInteger(MQL_TESTER);
-   if(!AllowedAccount() || !InputsValid())
+   Print("QTE 1.02 INIT | chart=",_Symbol," | Symbols=",Symbols,
+         " | tester=",tester," | StartOnLoad=",StartOnLoad,
+         " | ConfirmCostInputs=",ConfirmCostInputs);
+   if(!AllowedAccount())
+   {
+      Print("QTE 1.02: use a demo account or Strategy Tester.");
       return INIT_PARAMETERS_INCORRECT;
+   }
+   if(!InputsValid())
+   {
+      Print("QTE 1.02: invalid EA inputs. Check risk, strategy and execution settings.");
+      return INIT_PARAMETERS_INCORRECT;
+   }
    activeMode=RiskMode;
    trade.SetExpertMagicNumber(Magic);
    trade.SetAsyncMode(false);
-   if(!OpenState() || !LoadMarkets())
+   if(!OpenState())
+   {
+      Print("QTE 1.02: could not open account risk state.");
       return INIT_FAILED;
+   }
+   if(!LoadMarkets())
+   {
+      Print("QTE 1.02: no market state available. Chart=",_Symbol);
+      return INIT_FAILED;
+   }
    if(!EventSetMillisecondTimer(PollMilliseconds))
+   {
+      Print("QTE 1.02: timer initialization failed. Error=",GetLastError());
       return INIT_FAILED;
+   }
    if(WriteExecutionLog)
    {
       const string filename="QTE_"+(string)AccountInfoInteger(ACCOUNT_LOGIN)+"_"+
@@ -1349,6 +1374,10 @@ int OnInit()
                    "deal","price","lots","estimated_risk","estimated_reward","elapsed_us");
    }
    running=StartOnLoad;
+   if(tester && !StartOnLoad)
+      Print("QTE 1.02: tester entries paused; set StartOnLoad=true.");
+   if(!ConfirmCostInputs)
+      Print("QTE 1.02: entries blocked until broker fee inputs are confirmed.");
    if(EnableAI)
       Print("QTE: AI input enabled, calibrated runtime model unavailable; rule strategies only.");
    DrawPanel(true);
