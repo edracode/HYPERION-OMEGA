@@ -1,1037 +1,1422 @@
-//+------------------------------------------------------------------+
-//|                                                  Vulcares_Vx.mq5 |
-//|        M15/M5 Swing-Trend Pullback & Basket Profit Engine        |
-//|   Built for High-Spread XAUUSDm (Fixes M1 Noise & SL Bug)        |
-//+------------------------------------------------------------------+
-#property copyright "Vulcares Quantitative Engineering"
-#property version   "3.00"
 #property strict
+#property version "1.00"
+#property description "Quantum Trading Engine | Strategy Tester and demo"
 
-#include <Trade\Trade.mqh>
-#include <Trade\PositionInfo.mqh>
-#include <Trade\SymbolInfo.mqh>
+#include <Trade/Trade.mqh>
 
-//--- Enums
-enum ENUM_EXECUTION_MODE
+// Strategy Tester: verifikasi biaya broker, isi parameter komisi,
+// lalu aktifkan ConfirmCostInputs dan StartOnLoad.
+// Untuk akun demo, verifikasi biaya broker lalu tekan START pada panel.
+
+enum QTERiskMode
 {
-   MODE_TREND_LAYERING      = 0, // Trend Pyramiding Layering (Up=BUY, Down=SELL)
-   MODE_STRICT_SINGLE_ENTRY = 1  // Single Entry Only
+   AGGRESSIVE,
+   SUPER_AGGRESSIVE,
+   ADAPTIVE_AGGRESSIVE
 };
 
-enum ENUM_EA_STATE
+input group "Risk and account"
+input QTERiskMode RiskMode=SUPER_AGGRESSIVE;
+input double RiskPerTradeAggressive=4.0;
+input double RiskPerTradeSuperAggressive=5.0;
+input double MaxDailyRiskPercent=20.0;
+input double RiskRewardRatio=2.0;
+input double TargetWinRate=60.0;
+input int MinimumValidationTrades=1000;
+input long StrategySearchCapacity=1000000;
+input double ReferenceAccountEquity=1000.0;
+input double ReferenceDailyRiskAmount=200.0;
+input double ReferenceTradeRiskAggressive=40.0;
+input double ReferenceTradeRiskSuperAggressive=50.0;
+input bool EnableCompoundRisk=true;
+input bool AllowDemoTrading=true;
+input bool AllowLiveTrading=false;
+input bool StartOnLoad=false;
+input bool EnableDailyRiskLock=true;
+input bool EnableEmergencyStop=true;
+input bool EnableMartingale=false;
+input bool EnableUnlimitedAveraging=false;
+input double MinimumMarginLevel=250.0;
+input double MaxCurrencyClusterPercent=10.0;
+input double CommissionRoundTurnPerLot=0.0;
+input double MaxFeesAtStopPerLot=0.0;
+input bool ConfirmCostInputs=false;
+input double StopSlippageTicks=3.0;
+input double EntrySlippageTicks=2.0;
+input ulong Magic=761921;
+
+input group "Market and strategies"
+input string Symbols="XAUUSD,EURUSD,BTCUSD";
+input ENUM_TIMEFRAMES SignalTimeframe=PERIOD_M1;
+input ENUM_TIMEFRAMES ContextTimeframe=PERIOD_M5;
+input bool EnableMultiSymbol=true;
+input bool EnableMultiStrategy=true;
+input bool EnableIntrabarExecution=true;
+input bool EnableTickBackfill=false;
+input bool EnableRapidReentry=true;
+input bool EnableAI=true;
+input bool EnableAdaptiveStrategies=true;
+input bool EnableCorrelationFilter=true;
+input bool StrictRiskRewardMode=true;
+input bool EnableBreakEven=false;
+input bool EnableTrailing=false;
+input int MaximumHoldSeconds=180;
+input int MinimumReentrySeconds=10;
+input int MaximumPositionsPerSymbol=2;
+input int PollMilliseconds=100;
+input int MaximumQuoteAgeSeconds=3;
+input double MaxSpreadToATR=0.18;
+input double MinimumSignalScore=64.0;
+input int StrategyMask=63;
+input int FastEMA=9;
+input int SlowEMA=26;
+input int BreakoutLookback=16;
+input double ATRStopMultiple=1.25;
+input bool WriteExecutionLog=true;
+
+CTrade trade;
+QTERiskMode activeMode;
+bool running=false, emergency=false, dailyLock=false, tester=false, storageOK=true;
+bool foreignExposure=false, exposureOK=false, finishFlatten=false;
+datetime sessionDay=0;
+double startEquity=0, dayLimit=0, dailyLoss=0, dailyNet=0, floatingLoss=0;
+double riskToStop=0, remaining=0, drawdown=0, maxDrawdown=0;
+int lease=INVALID_HANDLE, ledger=INVALID_HANDLE;
+ulong latencyBuffer[512];
+int latencyCount=0, latencyNext=0;
+ulong lastPanel=0, nextFlatten=0;
+string statusText="Paused";
+
+struct Market
 {
-   STATE_INITIALIZING = 0,
-   STATE_SCANNING,
-   STATE_ENTRY_PENDING,
-   STATE_POSITION_ACTIVE,
-   STATE_LAYERING_ACTIVE,
-   STATE_TRAILING_ACTIVE,
-   STATE_RISK_LOCK,
-   STATE_DISCONNECTED,
-   STATE_EMERGENCY_STOP
+   string symbol;
+   int fastHandle, slowHandle, atrHandle, rsiHandle, adxHandle, contextFast, contextSlow;
+   datetime barTime;
+   long quoteTime;
+   double lastBid,lastAsk,atr,fast,slow,rsi,adx,higherFast,higherSlow;
+   double high,low,mean,deviation,pivot,previousClose;
+   double impulse[16];
+   int head,count;
+   string regime;
+   double regimeScore,score,spread;
 };
 
-//--- Input Parameters
-input group "=== 1. GENERAL SETTINGS ==="
-input bool                InpTradingEnabled       = true;                      // Trading Enabled
-input bool                InpDemoOnly             = true;                      // Safety: Demo/Tester Only Mode
-input ulong               InpMagicNumber          = 20260306;                  // Magic Number
-input string              InpTradingSymbol        = "";                        // Trading Symbol (Empty = Current)
-input ENUM_TIMEFRAMES     InpEntryTimeframe       = PERIOD_M5;                 // Entry Confirmation Timeframe (M5 - Immune to M1 Noise)
-input ENUM_TIMEFRAMES     InpTrendTimeframe       = PERIOD_M15;                // Macro Trend Filter Timeframe (M15)
-input bool                InpEnableBuy            = true;                      // Enable BUY Engine
-input bool                InpEnableSell           = true;                      // Enable SELL Engine
-input ENUM_EXECUTION_MODE InpExecutionMode        = MODE_TREND_LAYERING;       // Execution Mode
-
-input group "=== 2. SWING TREND & PULLBACK REJECTION FILTER ==="
-input int                 InpFastEMAPeriod        = 21;                        // Fast EMA Period
-input int                 InpSlowEMAPeriod        = 55;                        // Slow EMA Period
-input int                 InpTrendEMAPeriod       = 200;                       // Macro Trend EMA Period (M15)
-input int                 InpRSIPeriod            = 14;                        // RSI Period (M5)
-input double              InpRSIBuyPullbackMax    = 58.0;                      // Max M5 RSI for BUY (Avoid Buying Overbought Tops!)
-input double              InpRSIBuyPullbackMin    = 40.0;                      // Min M5 RSI for BUY (Confirm Bullish Pullback)
-input double              InpRSISellPullbackMin   = 42.0;                      // Min M5 RSI for SELL (Avoid Selling Oversold Bottoms!)
-input double              InpRSISellPullbackMax   = 60.0;                      // Max M5 RSI for SELL (Confirm Bearish Pullback)
-input int                 InpATRPeriod            = 14;                        // ATR Period (M5)
-input int                 InpMinATRPointsM5       = 250;                       // Min M5 ATR (points)
-input int                 InpMaxATRPointsM5       = 4500;                      // Max M5 ATR (points - Allows Active XAUUSD!)
-input int                 InpMinCooldownMinutes   = 10;                        // Min Cooldown After Exit (Minutes - Stops Overtrading)
-
-input group "=== 3. TREND PYRAMIDING LAYERING SETTINGS ==="
-input double              InpBaseLot              = 0.01;                      // Fixed Base Lot (0.01)
-input bool                InpEnableTrendLayering  = true;                      // Enable Pyramiding Layering
-input int                 InpMaxLayers            = 3;                         // Max Simultaneous Layers Per Direction
-input int                 InpLayerStepPoints      = 750;                       // Min Favorable Distance to Add Layer (points)
-input double              InpLayerLotMultiplier   = 1.0;                       // Layer Lot Multiplier (1.0 = Fixed 0.01)
-
-input group "=== 4. STOP LOSS ($10 USD/USC) & REALISTIC GOLD TRAILING ==="
-input double              InpStopLossMoney        = 10.0;                      // Stop Loss Per Position ($10.00 USD/USC)
-input int                 InpFallbackSLPoints     = 1000;                      // Fallback SL Points (1000 pts = $10 @ 0.01 lot)
-input bool                InpEnableTakeProfit     = true;                      // Enable Structural Take Profit Target
-input double              InpRiskRewardRatio      = 2.2;                       // Take Profit R:R Ratio (2.2x SL = +$22 vs -$10)
-input bool                InpEnableTrailingStop   = true;                      // Enable Wide Gold Trailing Stop
-input int                 InpTrailingStartPts     = 1100;                      // Min Profit Before Trailing Starts (points = +$11)
-input int                 InpTrailingDistancePts  = 800;                       // Trailing Breathing Distance (points = $8)
-input int                 InpTrailingStepPts      = 50;                        // Min SL Modification Step (points)
-
-input group "=== 5. SAFETY & RISK PROTECTION ==="
-input int                 InpMaxSpreadPoints      = 350;                       // Max Allowed Spread (points)
-input int                 InpMaxSlippagePoints    = 50;                        // Max Slippage (points)
-input double              InpMaxDailyLossPercent  = 15.0;                      // Max Daily Loss (% Balance)
-input double              InpMaxEquityDDPercent   = 25.0;                      // Max Equity Drawdown (% Peak)
-input double              InpMaxExposureLots      = 0.05;                      // Max Total Exposure (Lots)
-input double              InpMinFreeMarginPercent = 150.0;                     // Min Free Margin Level (%)
-
-input group "=== 6. DASHBOARD & VISUALS ==="
-input bool                InpShowDashboard        = true;                      // Show Dark Professional Dashboard
-input bool                InpShowTradeVisuals     = true;                      // Show Entry/Exit Arrows & SL Lines
-
-//--- Structs
-struct PositionTracker
+struct Signal
 {
-   ulong    ticket;
-   int      type;
-   double   open_price;
-   double   volume;
-   double   highest_bid;
-   double   lowest_ask;
-   double   current_sl;
-   datetime open_time;
+   int strategy;
+   int direction;
+   double score;
+   double stopDistance;
 };
 
-//--- Globals
-CTrade             ExtTrade;
-CPositionInfo      ExtPos;
-CSymbolInfo        ExtSym;
+Market markets[];
 
-string             g_symbol;
-ENUM_EA_STATE      g_state = STATE_INITIALIZING;
-bool               g_emergency_stop = false;
-bool               g_order_pending = false;
-datetime           g_last_exit_time = 0;
-datetime           g_last_entry_bar_time = 0;
-double             g_day_start_balance = 0.0;
-double             g_peak_equity = 0.0;
-int                g_current_day = -1;
-
-// Indicator Handles
-int                g_h_ema_fast_m5  = INVALID_HANDLE;
-int                g_h_ema_slow_m5  = INVALID_HANDLE;
-int                g_h_rsi_m5       = INVALID_HANDLE;
-int                g_h_atr_m5       = INVALID_HANDLE;
-int                g_h_ema_fast_m15 = INVALID_HANDLE;
-int                g_h_ema_slow_m15 = INVALID_HANDLE;
-int                g_h_ema_200_m15  = INVALID_HANDLE;
-
-// Live metrics
-double             g_current_atr_pts  = 0.0;
-double             g_current_rsi_m5   = 50.0;
-string             g_macro_bias       = "NEUTRAL";
-string             g_signal_status    = "SCANNING";
-
-// Tracked positions
-PositionTracker    g_tracked[20];
-int                g_tracked_count = 0;
-
-string             g_prefix = "VULCARES_VX_";
-
-//+------------------------------------------------------------------+
-//| Expert initialization function                                   |
-//+------------------------------------------------------------------+
-int OnInit()
+string Upper(string value)
 {
-   g_symbol = (InpTradingSymbol == "") ? _Symbol : InpTradingSymbol;
-   if(!ExtSym.Name(g_symbol))
-      return(INIT_FAILED);
-   ExtSym.RefreshRates();
-
-   ENUM_ACCOUNT_TRADE_MODE acc_mode = (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE);
-   if(InpDemoOnly && acc_mode == ACCOUNT_TRADE_MODE_REAL && !MQLInfoInteger(MQL_TESTER))
-   {
-      Alert("[Vulcares Vx] SAFETY LOCK: InpDemoOnly=true blocks LIVE accounts.");
-      g_state = STATE_RISK_LOCK;
-   }
-
-   g_h_ema_fast_m5  = iMA(g_symbol, InpEntryTimeframe, InpFastEMAPeriod,  0, MODE_EMA, PRICE_CLOSE);
-   g_h_ema_slow_m5  = iMA(g_symbol, InpEntryTimeframe, InpSlowEMAPeriod,  0, MODE_EMA, PRICE_CLOSE);
-   g_h_rsi_m5       = iRSI(g_symbol, InpEntryTimeframe, InpRSIPeriod, PRICE_CLOSE);
-   g_h_atr_m5       = iATR(g_symbol, InpEntryTimeframe, InpATRPeriod);
-   g_h_ema_fast_m15 = iMA(g_symbol, InpTrendTimeframe, InpFastEMAPeriod,  0, MODE_EMA, PRICE_CLOSE);
-   g_h_ema_slow_m15 = iMA(g_symbol, InpTrendTimeframe, InpSlowEMAPeriod,  0, MODE_EMA, PRICE_CLOSE);
-   g_h_ema_200_m15  = iMA(g_symbol, InpTrendTimeframe, InpTrendEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
-
-   if(g_h_ema_fast_m5 == INVALID_HANDLE || g_h_ema_slow_m5 == INVALID_HANDLE || g_h_rsi_m5 == INVALID_HANDLE ||
-      g_h_atr_m5 == INVALID_HANDLE || g_h_ema_fast_m15 == INVALID_HANDLE || g_h_ema_slow_m15 == INVALID_HANDLE ||
-      g_h_ema_200_m15 == INVALID_HANDLE)
-   {
-      Print("[Vulcares Vx] Failed to create indicator handles.");
-      return(INIT_FAILED);
-   }
-
-   ExtTrade.SetExpertMagicNumber(InpMagicNumber);
-   ExtTrade.SetDeviationInPoints(InpMaxSlippagePoints);
-   ExtTrade.SetTypeFillingBySymbol(g_symbol);
-   ExtTrade.SetAsyncMode(false);
-
-   g_day_start_balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   g_peak_equity       = AccountInfoDouble(ACCOUNT_EQUITY);
-   MqlDateTime dt;
-   TimeCurrent(dt);
-   g_current_day = dt.day_of_year;
-
-   ReconcilePositions();
-
-   if(InpShowDashboard)
-      CreateDashboard();
-
-   EventSetMillisecondTimer(250);
-   if(g_state != STATE_RISK_LOCK)
-      g_state = STATE_SCANNING;
-
-   int calc_sl = MoneyToPoints(InpStopLossMoney, InpBaseLot);
-   Print("[Vulcares Vx] v3.00 Initialized | Symbol: ", g_symbol, " | SL ($", InpStopLossMoney, "): ", calc_sl, " pts");
-   return(INIT_SUCCEEDED);
+   StringToUpper(value);
+   return value;
 }
 
-//+------------------------------------------------------------------+
-//| Expert deinitialization function                                 |
-//+------------------------------------------------------------------+
+string ResolveSymbol(string name)
+{
+   StringTrimLeft(name);
+   StringTrimRight(name);
+   if(name==_Symbol || SymbolSelect(name,true))
+      return name;
+
+   const string wanted=Upper(name);
+   string match="";
+   for(int i=0;i<SymbolsTotal(false);i++)
+   {
+      const string candidate=SymbolName(i,false);
+      const string root=Upper(candidate);
+      if(root==wanted)
+         return SymbolSelect(candidate,true) ? candidate : "";
+      if(StringFind(root,wanted)<0)
+         continue;
+      if(match!="")
+      {
+         Print("QTE: ambiguous broker symbol ",name,"; use the exact name.");
+         return "";
+      }
+      match=candidate;
+   }
+   return match!="" && SymbolSelect(match,true) ? match : "";
+}
+
+bool LoadMarkets()
+{
+   string names[];
+   const int n=EnableMultiSymbol ? StringSplit(Symbols,',',names) : 1;
+   if(n<1 || n>40)
+      return false;
+
+   ArrayResize(markets,n);
+   for(int i=0;i<n;i++)
+   {
+      markets[i].fastHandle=INVALID_HANDLE;
+      markets[i].slowHandle=INVALID_HANDLE;
+      markets[i].atrHandle=INVALID_HANDLE;
+      markets[i].rsiHandle=INVALID_HANDLE;
+      markets[i].adxHandle=INVALID_HANDLE;
+      markets[i].contextFast=INVALID_HANDLE;
+      markets[i].contextSlow=INVALID_HANDLE;
+   }
+
+   for(int i=0;i<n;i++)
+   {
+      const string s=EnableMultiSymbol ? ResolveSymbol(names[i]) : _Symbol;
+      if(s=="")
+      {
+         Print("QTE: unresolved symbol ",names[i]);
+         return false;
+      }
+      for(int j=0;j<i;j++)
+         if(markets[j].symbol==s)
+            return false;
+
+      markets[i].symbol=s;
+      markets[i].fastHandle=iMA(s,SignalTimeframe,FastEMA,0,MODE_EMA,PRICE_CLOSE);
+      markets[i].slowHandle=iMA(s,SignalTimeframe,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
+      markets[i].atrHandle=iATR(s,SignalTimeframe,14);
+      markets[i].rsiHandle=iRSI(s,SignalTimeframe,14,PRICE_CLOSE);
+      markets[i].adxHandle=iADX(s,SignalTimeframe,14);
+      markets[i].contextFast=iMA(s,ContextTimeframe,FastEMA,0,MODE_EMA,PRICE_CLOSE);
+      markets[i].contextSlow=iMA(s,ContextTimeframe,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
+      if(markets[i].fastHandle==INVALID_HANDLE || markets[i].slowHandle==INVALID_HANDLE ||
+         markets[i].atrHandle==INVALID_HANDLE || markets[i].rsiHandle==INVALID_HANDLE ||
+         markets[i].adxHandle==INVALID_HANDLE || markets[i].contextFast==INVALID_HANDLE ||
+         markets[i].contextSlow==INVALID_HANDLE)
+         return false;
+   }
+   return true;
+}
+
+void ReleaseMarkets()
+{
+   for(int i=0;i<ArraySize(markets);i++)
+   {
+      IndicatorRelease(markets[i].fastHandle);
+      IndicatorRelease(markets[i].slowHandle);
+      IndicatorRelease(markets[i].atrHandle);
+      IndicatorRelease(markets[i].rsiHandle);
+      IndicatorRelease(markets[i].adxHandle);
+      IndicatorRelease(markets[i].contextFast);
+      IndicatorRelease(markets[i].contextSlow);
+   }
+}
+
+bool ReadFeature(const int handle,double &value)
+{
+   double buffer[1];
+   if(CopyBuffer(handle,0,1,1,buffer)!=1 || buffer[0]==EMPTY_VALUE ||
+      !MathIsValidNumber(buffer[0]))
+      return false;
+   value=buffer[0];
+   return true;
+}
+
+bool RefreshFeatures(Market &market,const datetime currentBar)
+{
+   if(market.barTime==currentBar)
+      return true;
+   if(!ReadFeature(market.fastHandle,market.fast) || !ReadFeature(market.slowHandle,market.slow) ||
+      !ReadFeature(market.atrHandle,market.atr) || market.atr<=0 ||
+      !ReadFeature(market.rsiHandle,market.rsi) || !ReadFeature(market.adxHandle,market.adx) ||
+      !ReadFeature(market.contextFast,market.higherFast) ||
+      !ReadFeature(market.contextSlow,market.higherSlow))
+      return false;
+
+   MqlRates bars[];
+   ArraySetAsSeries(bars,true);
+   if(CopyRates(market.symbol,SignalTimeframe,1,BreakoutLookback,bars)!=BreakoutLookback)
+      return false;
+
+   market.high=bars[0].high;
+   market.low=bars[0].low;
+   market.previousClose=bars[0].close;
+   market.pivot=(bars[0].high+bars[0].low+bars[0].close)/3.0;
+
+   double average=0,m2=0;
+   for(int i=0;i<BreakoutLookback;i++)
+   {
+      market.high=MathMax(market.high,bars[i].high);
+      market.low=MathMin(market.low,bars[i].low);
+      const double delta=bars[i].close-average;
+      average+=delta/(i+1);
+      m2+=delta*(bars[i].close-average);
+   }
+
+   market.mean=average;
+   market.deviation=MathSqrt(MathMax(0,m2/BreakoutLookback));
+   market.barTime=currentBar;
+   return true;
+}
+
+double TickImpulse(const Market &market)
+{
+   double total=0;
+   for(int i=0;i<market.count;i++)
+      total+=market.impulse[i];
+   return market.atr>0 ? total/market.atr : 0;
+}
+
+void Offer(Signal &signals[],const int strategy,const int direction,const double base,
+           const double strength,const double stop,const bool regimeMatch)
+{
+   if((StrategyMask & (1 << (strategy-1)))==0)
+      return;
+
+   const int n=ArraySize(signals);
+   ArrayResize(signals,n+1);
+   signals[n].strategy=strategy;
+   signals[n].direction=direction;
+   const double adjustment=EnableAdaptiveStrategies ? (regimeMatch ? 5.0 : -10.0) : 0;
+   signals[n].score=MathMin(100.0,base+adjustment+MathMin(15.0,MathAbs(strength)*12.0));
+   signals[n].stopDistance=stop;
+}
+
+void Evaluate(Market &m,const double price,const double prev,Signal &signals[])
+{
+   const double trend=(m.fast-m.slow)/m.atr;
+   const double confirmation=m.higherFast-m.higherSlow;
+   const double velocity=TickImpulse(m);
+   const bool trending=m.adx>=23 && MathAbs(trend)>=0.18;
+   const bool range=m.adx<23;
+   const bool extreme=MathAbs(price-m.previousClose)>2.7*m.atr;
+
+   m.regime=extreme ? "Volatility expansion" :
+            (trending ? (trend>0 ? "Bull trend" : "Bear trend") : (range ? "Range" : "Mixed"));
+   m.regimeScore=MathMin(100.0,extreme ? MathAbs(price-m.previousClose)/m.atr*25 : m.adx*2);
+   if(extreme && EnableAdaptiveStrategies)
+      return;
+   const double stop=ATRStopMultiple*m.atr;
+
+   // 1. Multi-timeframe trend pullback
+   if(trend>0.16 && confirmation>0 && prev<=m.fast && price>m.fast && m.rsi>48)
+      Offer(signals,1,1,65,trend,stop,trending);
+   if(trend<-0.16 && confirmation<0 && prev>=m.fast && price<m.fast && m.rsi<52)
+      Offer(signals,1,-1,65,trend,stop,trending);
+
+   // 2. Range breakout
+   if(prev<=m.high && price>m.high && m.rsi>52)
+      Offer(signals,2,1,67,trend,stop,!range);
+   if(prev>=m.low && price<m.low && m.rsi<48)
+      Offer(signals,2,-1,67,trend,stop,!range);
+
+   // 3. Mean reversion
+   if(m.deviation>0 && range)
+   {
+      const double lower=m.mean-1.65*m.deviation;
+      const double upper=m.mean+1.65*m.deviation;
+      if(prev<=lower && price>lower && m.rsi<46)
+         Offer(signals,3,1,65,(m.mean-price)/m.deviation,stop,true);
+      if(prev>=upper && price<upper && m.rsi>54)
+         Offer(signals,3,-1,65,(price-m.mean)/m.deviation,stop,true);
+   }
+
+   // 4. Tick momentum
+   if(m.count>=8 && velocity>0.28 && price>m.pivot && price>prev && m.rsi>52)
+      Offer(signals,4,1,62,velocity,stop,trending);
+   if(m.count>=8 && velocity<-0.28 && price<m.pivot && price<prev && m.rsi<48)
+      Offer(signals,4,-1,62,velocity,stop,trending);
+
+   // 5. Failed breakout
+   if(prev<m.low && price>=m.low)
+      Offer(signals,5,1,64,(m.low-prev)/m.atr,MathMax(stop,price-prev),range);
+   if(prev>m.high && price<=m.high)
+      Offer(signals,5,-1,64,(prev-m.high)/m.atr,MathMax(stop,prev-price),range);
+
+   // 6. Volatility compression release
+   if(m.high-m.low<4.5*m.atr && confirmation>0 && prev<=m.pivot && price>m.pivot && velocity>0.12)
+      Offer(signals,6,1,66,velocity,stop,!extreme);
+   if(m.high-m.low<4.5*m.atr && confirmation<0 && prev>=m.pivot && price<m.pivot && velocity<-0.12)
+      Offer(signals,6,-1,66,velocity,stop,!extreme);
+}
+
+double AvailableRisk(const double limit,const double realizedLoss,const double markedLoss,
+                     const double stopExposure)
+{
+   return MathMax(0.0,limit-realizedLoss-MathMax(markedLoss,stopExposure));
+}
+
+double StopExposure(const double markedProfit,const double projectedProfit)
+{
+   return MathMax(0.0,-markedProfit)+MathMax(0.0,MathMin(0.0,markedProfit)-projectedProfit);
+}
+
+bool SizeDown(const double minVolume,const double maxVolume,const double step,
+              const double cashLimit,const double lossPerLot,double &lots)
+{
+   lots=0;
+   if(minVolume<=0 || maxVolume<minVolume || step<=0 || lossPerLot<=0 || cashLimit<=0)
+      return false;
+   const double cap=MathMin(maxVolume,cashLimit/lossPerLot);
+   if(cap+1e-12<minVolume)
+      return false;
+   lots=NormalizeDouble(minVolume+MathFloor((cap-minVolume)/step+1e-10)*step,8);
+   return lots>=minVolume && lots<=maxVolume && lots*lossPerLot<=cashLimit+1e-7;
+}
+
+datetime historyDay=0;
+ulong lastHistoryRead=0;
+double cashFlow=0, testerOpeningFunding=0;
+datetime testerFundingDay=0;
+bool historyValid=false;
+
+bool AllowedAccount()
+{
+   return (bool)MQLInfoInteger(MQL_TESTER) ||
+          (AllowDemoTrading && AccountInfoInteger(ACCOUNT_TRADE_MODE)==ACCOUNT_TRADE_MODE_DEMO);
+}
+
+bool InputsValid()
+{
+   return !AllowLiveTrading && !EnableMartingale && !EnableUnlimitedAveraging &&
+          EnableDailyRiskLock && EnableEmergencyStop && RiskRewardRatio>=2 &&
+          RiskPerTradeAggressive>0 && RiskPerTradeAggressive<=4 &&
+          RiskPerTradeSuperAggressive>0 && RiskPerTradeSuperAggressive<=5 &&
+          MaxDailyRiskPercent>0 && MaxDailyRiskPercent<=20 &&
+          MaxCurrencyClusterPercent>0 && MaxCurrencyClusterPercent<=20 &&
+          TargetWinRate>=60 && TargetWinRate<=100 && MinimumValidationTrades>=1 &&
+          StrategySearchCapacity>=1 && Magic>0 && ReferenceAccountEquity>0 &&
+          MinimumMarginLevel>=100 && CommissionRoundTurnPerLot>=0 &&
+          MaxFeesAtStopPerLot>=0 && StopSlippageTicks>=0 && EntrySlippageTicks>=0 &&
+          FastEMA>=2 && SlowEMA>FastEMA && BreakoutLookback>=4 && BreakoutLookback<=512 &&
+          PollMilliseconds>=25 && MaximumQuoteAgeSeconds>=1 && MaximumPositionsPerSymbol>=1 &&
+          MinimumReentrySeconds>=0 && MaximumHoldSeconds>=1 && ATRStopMultiple>0 &&
+          MaxSpreadToATR>0 && MinimumSignalScore>=0 && MinimumSignalScore<=100 &&
+          StrategyMask>0 && StrategyMask<=63;
+}
+
+uint ServerKey(const string server)
+{
+   uint hash=5381;
+   for(int i=0;i<StringLen(server);i++)
+      hash=hash*33+(uint)StringGetCharacter(server,i);
+   return hash;
+}
+
+bool SaveState()
+{
+   if(tester)
+      return true;
+   if(!storageOK || !FileSeek(lease,0,SEEK_SET))
+   {
+      storageOK=false;
+      return false;
+   }
+
+   const bool written=FileWriteDouble(lease,1.0)==8 &&
+                      FileWriteDouble(lease,(double)sessionDay)==8 &&
+                      FileWriteDouble(lease,startEquity)==8 &&
+                      FileWriteDouble(lease,dailyLock ? 1.0 : 0.0)==8 &&
+                      FileWriteDouble(lease,emergency ? 1.0 : 0.0)==8;
+   FileFlush(lease);
+   storageOK=written && FileSize(lease)==40;
+   return storageOK;
+}
+
+bool OpenState()
+{
+   if(tester)
+      return true;
+
+   const string filename="QTE_state_"+(string)ServerKey(AccountInfoString(ACCOUNT_SERVER))+
+                         "_"+(string)AccountInfoInteger(ACCOUNT_LOGIN)+".bin";
+   lease=FileOpen(filename,FILE_COMMON|FILE_BIN|FILE_READ|FILE_WRITE);
+   if(lease==INVALID_HANDLE)
+   {
+      Print("QTE: account state unavailable or another instance has the account lease.");
+      return false;
+   }
+   if(FileSize(lease)==0)
+      return SaveState();
+   if(FileSize(lease)!=40 || FileReadDouble(lease)!=1.0)
+      return false;
+
+   const double storedDay=FileReadDouble(lease);
+   startEquity=FileReadDouble(lease);
+   const double lockedFlag=FileReadDouble(lease);
+   const double emergencyFlag=FileReadDouble(lease);
+   if(!MathIsValidNumber(storedDay) || storedDay<0 || !MathIsValidNumber(startEquity) ||
+      startEquity<0 || (lockedFlag!=0 && lockedFlag!=1) || (emergencyFlag!=0 && emergencyFlag!=1))
+      return false;
+
+   sessionDay=(datetime)storedDay;
+   dailyLock=lockedFlag==1;
+   emergency=emergencyFlag==1;
+   return true;
+}
+
+datetime BrokerDay(const datetime now)
+{
+   MqlDateTime fields;
+   if(now<=0 || !TimeToStruct(now,fields))
+      return 0;
+   fields.hour=0;
+   fields.min=0;
+   fields.sec=0;
+   return StructToTime(fields);
+}
+
+bool ReadDayHistory(const datetime day,const datetime now)
+{
+   const ulong instant=GetTickCount64();
+   if(historyValid && historyDay==day && instant-lastHistoryRead<1000)
+      return true;
+
+   historyValid=false;
+   if(!HistorySelect(day,now+1))
+      return false;
+
+   double net=0,loss=0,cash=0;
+   for(int i=0;i<HistoryDealsTotal();i++)
+   {
+      const ulong ticket=HistoryDealGetTicket(i);
+      if(ticket==0)
+         return false;
+
+      const ENUM_DEAL_TYPE kind=(ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket,DEAL_TYPE);
+      const double profit=HistoryDealGetDouble(ticket,DEAL_PROFIT);
+      if(kind==DEAL_TYPE_BALANCE || kind==DEAL_TYPE_CREDIT || kind==DEAL_TYPE_BONUS ||
+         kind==DEAL_TYPE_CORRECTION)
+      {
+         cash+=profit;
+         continue;
+      }
+
+      const double dealNet=profit+HistoryDealGetDouble(ticket,DEAL_COMMISSION)+
+                           HistoryDealGetDouble(ticket,DEAL_SWAP)+HistoryDealGetDouble(ticket,DEAL_FEE);
+      net+=dealNet;
+      loss+=MathMax(0.0,-dealNet);
+   }
+
+   historyDay=day;
+   lastHistoryRead=instant;
+   historyValid=true;
+   dailyNet=net;
+   dailyLoss=loss;
+   cashFlow=cash-(testerFundingDay==day ? testerOpeningFunding : 0);
+   return true;
+}
+
+void ActivateDailyLock()
+{
+   if(!dailyLock)
+   {
+      dailyLock=true;
+      SaveState();
+      Print("QTE: daily loss limit reached. Entry locked.");
+   }
+}
+
+void HaltEmergency(const string reason)
+{
+   emergency=true;
+   running=false;
+   statusText=reason;
+   SaveState();
+   Print("QTE emergency: ",reason);
+}
+
+// A netting position can combine manual and EA fills despite having an EA magic.
+bool OwnedPosition()
+{
+   if((ulong)PositionGetInteger(POSITION_MAGIC)!=Magic)
+      return false;
+   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)==ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+      return true;
+
+   const ulong id=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
+   if(id==0 || !HistorySelectByPosition(id))
+      return false;
+
+   bool found=false;
+   for(int i=0;i<HistoryDealsTotal();i++)
+   {
+      const ulong deal=HistoryDealGetTicket(i);
+      if(deal==0)
+         return false;
+      const long kind=HistoryDealGetInteger(deal,DEAL_TYPE);
+      if(kind==DEAL_TYPE_BUY || kind==DEAL_TYPE_SELL)
+      {
+         found=true;
+         if((ulong)HistoryDealGetInteger(deal,DEAL_MAGIC)!=Magic)
+            return false;
+      }
+   }
+   return found;
+}
+
+double Cost(const double volume,const bool lossSide)
+{
+   return volume*(CommissionRoundTurnPerLot+(lossSide ? MaxFeesAtStopPerLot : 0));
+}
+
+bool PositionRisk(double &reserved,double &markedLoss)
+{
+   const string symbol=PositionGetString(POSITION_SYMBOL);
+   const double open=PositionGetDouble(POSITION_PRICE_OPEN);
+   const double stop=PositionGetDouble(POSITION_SL);
+   const double volume=PositionGetDouble(POSITION_VOLUME);
+   const ENUM_ORDER_TYPE side=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ?
+                              ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   const double tickSize=SymbolInfoDouble(symbol,SYMBOL_TRADE_TICK_SIZE);
+   const double stopFill=stop+(side==ORDER_TYPE_BUY ? -1.0 : 1.0)*tickSize*StopSlippageTicks;
+   double terminalProfit=0;
+
+   const double marked=PositionGetDouble(POSITION_PROFIT);
+   const double swap=PositionGetDouble(POSITION_SWAP);
+   markedLoss=MathMax(0.0,-(marked+swap));
+   if(stop<=0 || tickSize<=0 || stopFill<=0 ||
+      !OrderCalcProfit(side,symbol,volume,open,stopFill,terminalProfit))
+      return false;
+
+   terminalProfit+=MathMin(0.0,swap)-Cost(volume,true);
+   reserved=StopExposure(marked+swap,terminalProfit);
+   return true;
+}
+
+bool RefreshRisk()
+{
+   const datetime now=tester ? TimeCurrent() : TimeTradeServer();
+   const datetime today=BrokerDay(now);
+   if(!storageOK || today==0 || today<sessionDay || !ReadDayHistory(today,now))
+   {
+      statusText="Account audit unavailable";
+      return false;
+   }
+
+   const double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   if(today!=sessionDay)
+   {
+      if(dailyLock && (PositionsTotal()>0 || OrdersTotal()>0))
+      {
+         statusText="Previous daily lock awaits flat account";
+         return false;
+      }
+      const bool firstTesterDay=tester && sessionDay==0;
+      sessionDay=today;
+      if(firstTesterDay)
+      {
+         testerOpeningFunding=cashFlow;
+         testerFundingDay=today;
+         cashFlow=0;
+      }
+
+      const double openingBalance=AccountInfoDouble(ACCOUNT_BALANCE)-dailyNet-cashFlow;
+      // Use the lower observed or reconstructed value when observation starts late.
+      startEquity=MathMax(0.0,MathMin(equity-MathMax(0.0,cashFlow),openingBalance));
+      dailyLock=false;
+      if(!SaveState())
+         return false;
+   }
+
+   dayLimit=startEquity*MaxDailyRiskPercent/100;
+   if(!MathIsValidNumber(equity) || startEquity<=0)
+      return false;
+
+   drawdown=MathMax(0.0,startEquity-(equity-cashFlow));
+   maxDrawdown=MathMax(maxDrawdown,drawdown);
+   foreignExposure=false;
+   exposureOK=true;
+   riskToStop=0;
+   floatingLoss=0;
+
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      if(PositionGetTicket(i)==0)
+      {
+         exposureOK=false;
+         continue;
+      }
+
+      const bool own=OwnedPosition();
+      if(!own)
+         foreignExposure=true;
+      double reserved=0,markedLoss=0;
+      if(!PositionRisk(reserved,markedLoss) || PositionGetDouble(POSITION_TP)<=0)
+      {
+         exposureOK=false;
+         if(own && !emergency)
+            HaltEmergency("Owned position has missing or invalid protection");
+      }
+      riskToStop+=reserved;
+      floatingLoss+=markedLoss;
+   }
+
+   // This EA uses market entries. Existing orders block new entries.
+   if(OrdersTotal()>0)
+      foreignExposure=true;
+
+   remaining=AvailableRisk(dayLimit,dailyLoss,floatingLoss,riskToStop);
+   if(MathMax(drawdown,dailyLoss+floatingLoss)>=dayLimit)
+      ActivateDailyLock();
+
+   statusText=emergency ? "Emergency stop" : (dailyLock ? "Daily risk lock" :
+              (!exposureOK ? "Unprotected exposure" : (foreignExposure ? "Other exposure / order" :
+              (!ConfirmCostInputs ? "Confirm broker costs" : (running ? "Scanning" : "Paused")))));
+   return !dailyLock && !emergency && exposureOK && !foreignExposure && ConfirmCostInputs && storageOK;
+}
+
+double RoundPrice(const string s,const double price,const bool up)
+{
+   const double tickSize=SymbolInfoDouble(s,SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize<=0)
+      return 0;
+
+   const double steps=price/tickSize;
+   return NormalizeDouble((up ? MathCeil(steps-1e-9) : MathFloor(steps+1e-9))*tickSize,
+                          (int)SymbolInfoInteger(s,SYMBOL_DIGITS));
+}
+
+bool VolumeAtRisk(const string symbol,const double maximum,const double riskPerLot,double &lots)
+{
+   const double minimum=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MIN);
+   const double maxVolume=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MAX);
+   const double step=SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP);
+   return SizeDown(minimum,maxVolume,step,maximum,riskPerLot,lots);
+}
+
+double ClusterBudget(const string symbol,const int direction)
+{
+   if(!EnableCorrelationFilter)
+      return remaining;
+   const string base=SymbolInfoString(symbol,SYMBOL_CURRENCY_BASE);
+   const string quote=SymbolInfoString(symbol,SYMBOL_CURRENCY_PROFIT);
+   double used=0;
+
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      if(PositionGetTicket(i)==0)
+         return 0;
+
+      const string other=PositionGetString(POSITION_SYMBOL);
+      const string otherBase=SymbolInfoString(other,SYMBOL_CURRENCY_BASE);
+      const string otherQuote=SymbolInfoString(other,SYMBOL_CURRENCY_PROFIT);
+      const int otherDirection=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 1 : -1;
+      const bool shareSame=direction==otherDirection &&
+         ((base!="" && base==otherBase) || (quote!="" && quote==otherQuote));
+      const bool shareOpposite=direction!=otherDirection &&
+         ((base!="" && base==otherQuote) || (quote!="" && quote==otherBase));
+
+      if(other==symbol || shareSame || shareOpposite)
+      {
+         double reserved=0,markedLoss=0;
+         if(!PositionRisk(reserved,markedLoss))
+            return 0;
+         used+=reserved;
+      }
+   }
+   return MathMax(0.0,startEquity*MaxCurrencyClusterPercent/100-used);
+}
+
+struct TradePlan
+{
+   double entry,stop,target,lots,estimatedRisk,estimatedReward;
+   ENUM_ORDER_TYPE side;
+   ENUM_ORDER_TYPE_FILLING filling;
+};
+
+bool CanSend()
+{
+   return AllowedAccount() && TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) &&
+          MQLInfoInteger(MQL_TRADE_ALLOWED) && AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) &&
+          AccountInfoInteger(ACCOUNT_TRADE_EXPERT);
+}
+
+bool SymbolSessionOpen(const string s,const datetime now)
+{
+   MqlDateTime fields;
+   if(!TimeToStruct(now,fields))
+      return false;
+   const int seconds=fields.hour*3600+fields.min*60+fields.sec;
+
+   for(int backwards=0;backwards<=1;backwards++)
+   {
+      const ENUM_DAY_OF_WEEK day=(ENUM_DAY_OF_WEEK)((fields.day_of_week+7-backwards)%7);
+      datetime from=0,to=0;
+      for(uint i=0;SymbolInfoSessionTrade(s,day,i,from,to);i++)
+      {
+         const int first=(int)((long)from%86400);
+         const int last=(int)((long)to%86400);
+         if(backwards==0 && ((first==last) || (first<last && seconds>=first && seconds<last) ||
+                            (first>last && seconds>=first)))
+            return true;
+         if(backwards==1 && first>last && seconds<last)
+            return true;
+      }
+   }
+   return false;
+}
+
+bool FillPolicy(const string symbol,ENUM_ORDER_TYPE_FILLING &filling)
+{
+   const long execution=SymbolInfoInteger(symbol,SYMBOL_TRADE_EXEMODE);
+   const long mask=SymbolInfoInteger(symbol,SYMBOL_FILLING_MODE);
+   if(execution==SYMBOL_TRADE_EXECUTION_REQUEST || execution==SYMBOL_TRADE_EXECUTION_INSTANT ||
+      (mask & SYMBOL_FILLING_FOK)!=0)
+   {
+      filling=ORDER_FILLING_FOK;
+      return true;
+   }
+
+   if((mask & SYMBOL_FILLING_IOC)==0)
+      return false;
+   filling=ORDER_FILLING_IOC;
+   return true;
+}
+
+string StrategyTag(const int id)
+{
+   return "QTE:S"+IntegerToString(id);
+}
+
+bool PositionSlot(const string symbol,const int strategy,const int direction)
+{
+   const bool hedging=AccountInfoInteger(ACCOUNT_MARGIN_MODE)==ACCOUNT_MARGIN_MODE_RETAIL_HEDGING;
+   int count=0;
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      if(PositionGetTicket(i)==0)
+         return false;
+      if(PositionGetString(POSITION_SYMBOL)!=symbol)
+         continue;
+      if(!hedging || !EnableMultiStrategy)
+         return false;
+
+      const int held=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 1 : -1;
+      const string label=PositionGetString(POSITION_COMMENT);
+      if(held!=direction || label==StrategyTag(strategy) || StringFind(label,"QTE:S")!=0)
+         return false;
+      count++;
+   }
+   return count<MaximumPositionsPerSymbol;
+}
+
+bool MakePlan(const Market &market,const MqlTick &tick,const Signal &signal,TradePlan &plan)
+{
+   const string s=market.symbol;
+   const int d=signal.direction;
+   const long mode=SymbolInfoInteger(s,SYMBOL_TRADE_MODE);
+   if((mode!=SYMBOL_TRADE_MODE_FULL && mode!=(d>0 ? SYMBOL_TRADE_MODE_LONGONLY : SYMBOL_TRADE_MODE_SHORTONLY))
+      || !FillPolicy(s,plan.filling))
+      return false;
+
+   const long supported=SymbolInfoInteger(s,SYMBOL_ORDER_MODE);
+   if((supported & SYMBOL_ORDER_MARKET)==0 || (supported & SYMBOL_ORDER_SL)==0 ||
+      (supported & SYMBOL_ORDER_TP)==0)
+      return false;
+   const double point=SymbolInfoDouble(s,SYMBOL_POINT);
+   const double unit=SymbolInfoDouble(s,SYMBOL_TRADE_TICK_SIZE);
+   if(point<=0 || unit<=0)
+      return false;
+
+   const double minimumDistance=unit+point*MathMax(SymbolInfoInteger(s,SYMBOL_TRADE_STOPS_LEVEL),
+                                                   SymbolInfoInteger(s,SYMBOL_TRADE_FREEZE_LEVEL));
+   plan.side=d>0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   plan.entry=d>0 ? tick.ask : tick.bid;
+   const double exitQuote=d>0 ? tick.bid : tick.ask;
+   const double assumed=plan.entry+d*unit*EntrySlippageTicks;
+   const double stopDistance=MathMax(signal.stopDistance,market.spread+minimumDistance);
+   plan.stop=RoundPrice(s,plan.entry-d*stopDistance,d<0);
+   const double stopFill=plan.stop-d*unit*StopSlippageTicks;
+   const double probe=SymbolInfoDouble(s,SYMBOL_VOLUME_MIN);
+   double stopPnL=0;
+   if(probe<=0 || stopFill<=0 || assumed<=0 ||
+      !OrderCalcProfit(plan.side,s,probe,assumed,stopFill,stopPnL) || stopPnL>=0)
+      return false;
+   const double riskPerLot=-stopPnL/probe+Cost(1,true);
+
+   const double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   const double sizingEquity=EnableCompoundRisk ? equity : MathMin(equity,ReferenceAccountEquity);
+   const double percent=activeMode==AGGRESSIVE ? RiskPerTradeAggressive : RiskPerTradeSuperAggressive;
+   const double adaptive=activeMode==ADAPTIVE_AGGRESSIVE ?
+      MathMax(0.25,MathMin(1.0,signal.score/100.0-market.spread/market.atr)) : 1.0;
+   const double cap=MathMin(sizingEquity*percent*adaptive/100,
+                            MathMin(remaining,ClusterBudget(s,d)));
+   if(!VolumeAtRisk(s,cap,riskPerLot,plan.lots))
+      return false;
+
+   double actualStopPnL=0;
+   if(!OrderCalcProfit(plan.side,s,plan.lots,assumed,stopFill,actualStopPnL))
+      return false;
+   plan.estimatedRisk=-actualStopPnL+Cost(plan.lots,true);
+   if(plan.estimatedRisk<=0 || plan.estimatedRisk>cap+1e-7)
+      return false;
+   const double targetGross=RiskRewardRatio*plan.estimatedRisk+Cost(plan.lots,false);
+
+   const double minTargetDistance=MathMax(unit,minimumDistance-d*(assumed-exitQuote));
+   double low=minTargetDistance,high=MathMax(low,2.0*MathAbs(assumed-stopFill));
+   double gross=0;
+   bool bracketed=false;
+   for(int i=0;i<16;i++)
+   {
+      const double trial=assumed+d*high;
+      if(trial<=0 || !OrderCalcProfit(plan.side,s,plan.lots,assumed,trial,gross))
+         return false;
+      if(gross>=targetGross)
+      {
+         bracketed=true;
+         break;
+      }
+      high*=1.5;
+      if(d<0 && high>=assumed)
+         high=assumed-unit;
+      if(high<low)
+         return false;
+   }
+
+   if(!bracketed)
+      return false;
+   for(int i=0;i<32 && high-low>unit*0.05;i++)
+   {
+      const double middle=(low+high)/2;
+      if(!OrderCalcProfit(plan.side,s,plan.lots,assumed,assumed+d*middle,gross))
+         return false;
+      if(gross>=targetGross)
+         high=middle;
+      else
+         low=middle;
+   }
+
+   plan.target=RoundPrice(s,assumed+d*high,d>0);
+   if(plan.target<=0 ||
+      !OrderCalcProfit(plan.side,s,plan.lots,assumed,plan.target,gross))
+      return false;
+   plan.estimatedReward=gross-Cost(plan.lots,false);
+   if(plan.estimatedReward+1e-7<RiskRewardRatio*plan.estimatedRisk)
+      return false;
+
+   double margin=0;
+   return OrderCalcMargin(plan.side,s,plan.lots,assumed,margin) &&
+          margin>=0 && AccountInfoDouble(ACCOUNT_MARGIN_FREE)>=margin &&
+          equity*100>=MinimumMarginLevel*(AccountInfoDouble(ACCOUNT_MARGIN)+margin);
+}
+
+void LogExecution(const string s,const string action,const int strategy,const uint retcode,
+                  const ulong order,const ulong deal,const double price,const double lots,
+                  const double risk,const double reward,const ulong elapsed)
+{
+   if(ledger==INVALID_HANDLE)
+      return;
+   FileWrite(ledger,TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),s,action,strategy,retcode,
+             order,deal,price,lots,risk,reward,elapsed);
+   FileFlush(ledger);
+}
+
+void ReconcileDeal(const ulong deal)
+{
+   lastHistoryRead=0;
+   historyValid=false;
+   if(deal==0 || !HistoryDealSelect(deal) || (ulong)HistoryDealGetInteger(deal,DEAL_MAGIC)!=Magic)
+      return;
+   const ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal,DEAL_ENTRY);
+   if(entry!=DEAL_ENTRY_IN)
+      return;
+
+   const long id=HistoryDealGetInteger(deal,DEAL_POSITION_ID);
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      if(PositionGetTicket(i)==0 || PositionGetInteger(POSITION_IDENTIFIER)!=id)
+         continue;
+
+      const string s=PositionGetString(POSITION_SYMBOL);
+      const bool buy=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
+      const ENUM_ORDER_TYPE side=buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      const double open=PositionGetDouble(POSITION_PRICE_OPEN);
+      const double stop=PositionGetDouble(POSITION_SL);
+      const double take=PositionGetDouble(POSITION_TP);
+      const double vol=PositionGetDouble(POSITION_VOLUME);
+      const double tickSize=SymbolInfoDouble(s,SYMBOL_TRADE_TICK_SIZE);
+      const double fill=stop+(buy ? -1.0 : 1.0)*tickSize*StopSlippageTicks;
+
+      double gain=0,loss=0;
+      if(tickSize<=0 || stop<=0 || take<=0 || fill<=0 ||
+         !OrderCalcProfit(side,s,vol,open,fill,loss) ||
+         !OrderCalcProfit(side,s,vol,open,take,gain) ||
+         gain-Cost(vol,false)+1e-7 < RiskRewardRatio*(-loss+Cost(vol,true)))
+         HaltEmergency("Fill failed protection or net RR reconciliation");
+      return;
+   }
+}
+
+bool Submit(const Market &market,const Signal &signal,const TradePlan &plan)
+{
+   MqlTradeRequest request={};
+   MqlTradeCheckResult check={};
+   MqlTradeResult result={};
+   request.action=TRADE_ACTION_DEAL;
+   request.magic=Magic;
+   request.symbol=market.symbol;
+   request.volume=plan.lots;
+   request.type=plan.side;
+   request.price=plan.entry;
+   request.sl=plan.stop;
+   request.tp=plan.target;
+   request.deviation=(ulong)MathCeil(EntrySlippageTicks*
+      SymbolInfoDouble(market.symbol,SYMBOL_TRADE_TICK_SIZE)/SymbolInfoDouble(market.symbol,SYMBOL_POINT));
+   request.type_filling=plan.filling;
+   request.comment=StrategyTag(signal.strategy);
+
+   if(!OrderCheck(request,check) || (check.retcode!=0 && check.retcode!=TRADE_RETCODE_DONE) ||
+      check.margin_free<0 || (check.margin_level>0 && check.margin_level<MinimumMarginLevel))
+   {
+      LogExecution(market.symbol,"CHECK_REJECT",signal.strategy,check.retcode,0,0,
+                   plan.entry,plan.lots,plan.estimatedRisk,plan.estimatedReward,0);
+      return true;
+   }
+
+   const ulong before=GetMicrosecondCount();
+   const bool sent=OrderSend(request,result);
+   const ulong elapsed=GetMicrosecondCount()-before;
+   latencyBuffer[latencyNext]=elapsed;
+   latencyNext=(latencyNext+1)%512;
+   if(latencyCount<512)
+      latencyCount++;
+   LogExecution(market.symbol,"SEND",signal.strategy,result.retcode,result.order,result.deal,
+                result.price,result.volume,plan.estimatedRisk,plan.estimatedReward,elapsed);
+
+   if(sent && (result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_DONE_PARTIAL) &&
+      result.deal!=0 && result.price>0)
+   {
+      const double slip=signal.direction*(result.price-plan.entry);
+      const double maxSlip=EntrySlippageTicks*SymbolInfoDouble(market.symbol,SYMBOL_TRADE_TICK_SIZE);
+      if(slip>maxSlip+1e-9)
+         HaltEmergency("Entry slippage exceeded the risk estimate");
+      ReconcileDeal(result.deal);
+      RefreshRisk();
+      if(!exposureOK || riskToStop+dailyLoss>dayLimit+1e-7)
+         HaltEmergency("Post-fill portfolio risk exceeded the estimate");
+   }
+   else if(result.retcode==TRADE_RETCODE_PLACED || result.retcode==TRADE_RETCODE_TIMEOUT ||
+           result.retcode==TRADE_RETCODE_CONNECTION || result.order!=0 || result.deal!=0 ||
+           (sent && (result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_DONE_PARTIAL)))
+      HaltEmergency("Ambiguous order outcome; reconciling");
+
+   return true;
+}
+
+bool FlattenOwned()
+{
+   bool done=true;
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      const ulong ticket=OrderGetTicket(i);
+      if(ticket==0)
+      {
+         done=false;
+         continue;
+      }
+      if((ulong)OrderGetInteger(ORDER_MAGIC)!=Magic)
+         continue;
+      trade.OrderDelete(ticket);
+      if(trade.ResultRetcode()!=TRADE_RETCODE_DONE)
+         done=false;
+   }
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      const ulong ticket=PositionGetTicket(i);
+      if(ticket==0)
+      {
+         done=false;
+         continue;
+      }
+      if(!OwnedPosition())
+         continue;
+      const string s=PositionGetString(POSITION_SYMBOL);
+      trade.SetTypeFillingBySymbol(s);
+      trade.PositionClose(ticket);
+      if(trade.ResultRetcode()!=TRADE_RETCODE_DONE)
+         done=false;
+   }
+   return done;
+}
+
+void ManagePositions()
+{
+   if(StrictRiskRewardMode)
+      return;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      const ulong ticket=PositionGetTicket(i);
+      if(ticket==0 || !OwnedPosition())
+         continue;
+      const string s=PositionGetString(POSITION_SYMBOL);
+
+      if(TimeCurrent()-(datetime)PositionGetInteger(POSITION_TIME)>=MaximumHoldSeconds)
+      {
+         trade.SetTypeFillingBySymbol(s);
+         trade.PositionClose(ticket);
+         continue;
+      }
+      if(!EnableBreakEven && !EnableTrailing)
+         continue;
+
+      MqlTick tick;
+      if(!SymbolInfoTick(s,tick))
+         continue;
+
+      const bool buy=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
+      const int direction=buy ? 1 : -1;
+      const double price=buy ? tick.bid : tick.ask;
+      const double open=PositionGetDouble(POSITION_PRICE_OPEN);
+      const double stop=PositionGetDouble(POSITION_SL);
+      const double target=PositionGetDouble(POSITION_TP);
+      const double initialRisk=MathAbs(target-open)/RiskRewardRatio;
+      const double moved=direction*(price-open);
+      if(initialRisk<=0 || moved<initialRisk)
+         continue;
+
+      double proposed=EnableTrailing ? price-direction*initialRisk : open;
+      if(EnableBreakEven)
+         proposed=buy ? MathMax(proposed,open) : MathMin(proposed,open);
+      proposed=RoundPrice(s,proposed,!buy);
+      const double point=SymbolInfoDouble(s,SYMBOL_POINT);
+      const double minimum=point*MathMax(SymbolInfoInteger(s,SYMBOL_TRADE_FREEZE_LEVEL),
+                                         SymbolInfoInteger(s,SYMBOL_TRADE_STOPS_LEVEL));
+      if(proposed>0 && direction*(proposed-stop)>point/2 && direction*(price-proposed)>minimum)
+         trade.PositionModify(ticket,proposed,target);
+   }
+}
+
+void SampleQuote(Market &m,const MqlTick &tick)
+{
+   m.impulse[m.head]=((tick.bid+tick.ask)-(m.lastBid+m.lastAsk))/2;
+   m.head=(m.head+1)%16;
+   if(m.count<16)
+      m.count++;
+}
+
+void UpdateImpulse(Market &m,const MqlTick &latest)
+{
+   if(!EnableTickBackfill || latest.time_msc<=m.quoteTime || latest.time_msc-m.quoteTime>1000)
+   {
+      if(latest.time_msc-m.quoteTime>1000)
+      {
+         m.head=0;
+         m.count=0;
+      }
+      SampleQuote(m,latest);
+      return;
+   }
+
+   MqlTick recent[];
+   const int count=CopyTicks(m.symbol,recent,COPY_TICKS_INFO,(ulong)m.quoteTime+1,32);
+   if(count>0 && count<32)
+   {
+      for(int i=0;i<count;i++)
+      {
+         if(recent[i].time_msc>=latest.time_msc)
+            break;
+         if(recent[i].bid<=0 || recent[i].ask<recent[i].bid)
+            continue;
+         SampleQuote(m,recent[i]);
+         m.lastBid=recent[i].bid;
+         m.lastAsk=recent[i].ask;
+      }
+   }
+   else if(count==32)
+   {
+      m.head=0;
+      m.count=0;
+   }
+   SampleQuote(m,latest);
+}
+
+datetime lastAttempt[];
+
+void ProcessMarket(const int index,const bool permit)
+{
+   MqlTick tick;
+   const string s=markets[index].symbol;
+   if(!SymbolInfoTick(s,tick) || tick.ask<tick.bid || tick.bid<=0)
+      return;
+   if(tick.time_msc<markets[index].quoteTime ||
+      (tick.time_msc==markets[index].quoteTime &&
+       tick.bid==markets[index].lastBid && tick.ask==markets[index].lastAsk))
+      return;
+   if(ArraySize(lastAttempt)!=ArraySize(markets))
+      ArrayResize(lastAttempt,ArraySize(markets));
+
+   const bool hadQuote=markets[index].quoteTime>0;
+   const double previous=(markets[index].lastBid+markets[index].lastAsk)/2;
+   const datetime previousBar=markets[index].barTime;
+   const datetime activeBar=iTime(s,SignalTimeframe,0);
+   const bool ready=activeBar>0 && RefreshFeatures(markets[index],activeBar);
+   if(hadQuote)
+      UpdateImpulse(markets[index],tick);
+
+   markets[index].quoteTime=tick.time_msc;
+   markets[index].lastBid=tick.bid;
+   markets[index].lastAsk=tick.ask;
+   markets[index].spread=tick.ask-tick.bid;
+   if(!ready || !hadQuote || (!EnableIntrabarExecution && activeBar==previousBar))
+      return;
+
+   Signal signals[];
+   Evaluate(markets[index],(tick.bid+tick.ask)/2,previous,signals);
+   double best=0;
+   const int count=ArraySize(signals);
+   for(int i=0;i<count;i++)
+      best=MathMax(best,signals[i].score);
+   markets[index].score=best;
+
+   if(!permit || dailyLock || emergency || !RefreshRisk() || best<MinimumSignalScore ||
+      markets[index].spread>MaxSpreadToATR*markets[index].atr)
+      return;
+   const datetime now=tester ? TimeCurrent() : TimeTradeServer();
+   if(now<tick.time || now-tick.time>MaximumQuoteAgeSeconds || !SymbolSessionOpen(s,now))
+      return;
+
+   const int cooldown=EnableRapidReentry ? MinimumReentrySeconds :
+                      (int)MathMax(MinimumReentrySeconds,PeriodSeconds(SignalTimeframe));
+   if(lastAttempt[index]!=0 && now-lastAttempt[index]<cooldown)
+      return;
+
+   double support=0,resistance=0;
+   for(int i=0;i<count;i++)
+   {
+      if(signals[i].direction>0)
+         support=MathMax(support,signals[i].score);
+      else
+         resistance=MathMax(resistance,signals[i].score);
+   }
+
+   if(support>=MinimumSignalScore && resistance>=MinimumSignalScore &&
+      MathAbs(support-resistance)<10.0)
+      return;
+   const int direction=support>resistance ? 1 : -1;
+
+   for(int rank=0;rank<count;rank++)
+   {
+      int chosen=-1;
+      for(int i=0;i<count;i++)
+         if(signals[i].direction==direction && signals[i].score>=MinimumSignalScore &&
+            (chosen<0 || signals[i].score>signals[chosen].score))
+            chosen=i;
+      if(chosen<0)
+         return;
+
+      TradePlan plan;
+      if(PositionSlot(s,signals[chosen].strategy,direction) &&
+         MakePlan(markets[index],tick,signals[chosen],plan))
+      {
+         lastAttempt[index]=now;
+         Submit(markets[index],signals[chosen],plan);
+         return;
+      }
+      signals[chosen].score=-1;
+      if(!EnableMultiStrategy)
+         return;
+   }
+}
+
+void Button(const string name,const string text,const int row,const int x,const int width)
+{
+   const string key="QTE_"+name;
+   if(ObjectFind(0,key)>=0)
+      return;
+   if(!ObjectCreate(0,key,OBJ_BUTTON,0,0,0))
+      return;
+
+   ObjectSetInteger(0,key,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,key,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,key,OBJPROP_YDISTANCE,180+row*25);
+   ObjectSetInteger(0,key,OBJPROP_XSIZE,width);
+   ObjectSetInteger(0,key,OBJPROP_YSIZE,21);
+   ObjectSetInteger(0,key,OBJPROP_COLOR,clrWhite);
+   ObjectSetInteger(0,key,OBJPROP_BGCOLOR,name=="EMERGENCY" ? clrMaroon : clrDarkSlateGray);
+   ObjectSetInteger(0,key,OBJPROP_FONTSIZE,8);
+   ObjectSetString(0,key,OBJPROP_TEXT,text);
+}
+
+double Percentile(ulong &sorted[],const double probability)
+{
+   if(ArraySize(sorted)==0)
+      return 0;
+   return (double)sorted[(int)MathCeil(probability*ArraySize(sorted))-1]/1000;
+}
+
+void DrawPanel(const bool force)
+{
+   if(tester && !MQLInfoInteger(MQL_VISUAL_MODE))
+      return;
+   const ulong now=GetTickCount64();
+   if(!force && now-lastPanel<350)
+      return;
+   lastPanel=now;
+
+   Button("START","START",0,10,62);
+   Button("PAUSE","PAUSE",0,76,62);
+   Button("STOP","STOP",0,142,54);
+   Button("CLOSE","CLOSE ALL EA",0,200,93);
+   Button("EMERGENCY","EMERGENCY STOP",0,297,120);
+   Button("A","AGGRESSIVE 4%",1,10,121);
+   Button("B","SUPER AGGRESSIVE 5%",1,135,151);
+   Button("C","ADAPTIVE",1,290,127);
+
+   ulong sorted[];
+   ArrayCopy(sorted,latencyBuffer,0,0,latencyCount);
+   if(latencyCount>0)
+      ArraySort(sorted);
+
+   string message="QUANTUM TRADING ENGINE  |  "+(tester ? "TESTER" : "DEMO")+"  |  "+statusText+
+                  "\nMode "+EnumToString(activeMode)+"  |  "+AccountInfoString(ACCOUNT_CURRENCY)+
+                  "\nBalance "+DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2)+
+                  "  Equity "+DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)+
+                  "  Free margin "+DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE),2)+
+                  "  Margin % "+DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_LEVEL),1)+
+                  "\nDaily net "+DoubleToString(dailyNet,2)+
+                  "  Daily losses "+DoubleToString(dailyLoss,2)+
+                  "  Floating losses "+DoubleToString(floatingLoss,2)+
+                  "\nReserved "+DoubleToString(riskToStop,2)+
+                  "  Remaining "+DoubleToString(remaining,2)+
+                  "  DD "+DoubleToString(drawdown,2)+" / "+DoubleToString(maxDrawdown,2)+
+                  "\nPositions "+IntegerToString(PositionsTotal())+
+                  "  Strategy mask "+IntegerToString(StrategyMask)+"  AI rule mode"+
+                  "\nOrder latency p50 / p95 / p99 (ms) "+
+                  DoubleToString(Percentile(sorted,0.5),2)+" / "+
+                  DoubleToString(Percentile(sorted,0.95),2)+" / "+
+                  DoubleToString(Percentile(sorted,0.99),2);
+
+   for(int i=0;i<MathMin(ArraySize(markets),3);i++)
+      message+="\n"+markets[i].symbol+"  "+markets[i].regime+
+               "  strength "+DoubleToString(markets[i].regimeScore,0)+
+               "  signal "+DoubleToString(markets[i].score,0)+
+               "  spread "+DoubleToString(markets[i].spread,(int)SymbolInfoInteger(markets[i].symbol,SYMBOL_DIGITS));
+   Comment(message);
+}
+
+void HandleButton(const string key)
+{
+   if(StringFind(key,"QTE_")!=0)
+      return;
+   ObjectSetInteger(0,key,OBJPROP_STATE,false);
+   if(key=="QTE_START" && !emergency && !dailyLock && !finishFlatten)
+      running=true;
+   if(key=="QTE_PAUSE" || key=="QTE_STOP" || key=="QTE_CLOSE")
+      running=false;
+   if(key=="QTE_STOP" || key=="QTE_CLOSE")
+      finishFlatten=true;
+   if(key=="QTE_EMERGENCY")
+      HaltEmergency("Operator emergency stop");
+   if(key=="QTE_A")
+      activeMode=AGGRESSIVE;
+   if(key=="QTE_B")
+      activeMode=SUPER_AGGRESSIVE;
+   if(key=="QTE_C")
+      activeMode=ADAPTIVE_AGGRESSIVE;
+   Pump(false);
+   ChartRedraw();
+}
+
+int OnInit()
+{
+   tester=(bool)MQLInfoInteger(MQL_TESTER);
+   if(!AllowedAccount() || !InputsValid())
+      return INIT_PARAMETERS_INCORRECT;
+
+   activeMode=RiskMode;
+   trade.SetExpertMagicNumber(Magic);
+   trade.SetAsyncMode(false);
+   if(!OpenState() || !LoadMarkets())
+      return INIT_FAILED;
+   if(!EventSetMillisecondTimer(PollMilliseconds))
+      return INIT_FAILED;
+
+   if(WriteExecutionLog)
+   {
+      const string filename="QTE_"+(string)AccountInfoInteger(ACCOUNT_LOGIN)+"_"+
+                            (string)GetTickCount64()+".csv";
+      ledger=FileOpen(filename,FILE_WRITE|FILE_CSV|FILE_ANSI,',');
+      if(ledger!=INVALID_HANDLE)
+         FileWrite(ledger,"server_time","symbol","action","strategy","retcode","order",
+                   "deal","price","lots","estimated_risk","estimated_reward","elapsed_us");
+   }
+
+   running=StartOnLoad;
+   if(EnableAI)
+      Print("QTE: AI input enabled, calibrated runtime model unavailable; rule strategies only.");
+   DrawPanel(true);
+   return INIT_SUCCEEDED;
+}
+
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   IndicatorRelease(g_h_ema_fast_m5);
-   IndicatorRelease(g_h_ema_slow_m5);
-   IndicatorRelease(g_h_rsi_m5);
-   IndicatorRelease(g_h_atr_m5);
-   IndicatorRelease(g_h_ema_fast_m15);
-   IndicatorRelease(g_h_ema_slow_m15);
-   IndicatorRelease(g_h_ema_200_m15);
-   ObjectsDeleteAll(0, g_prefix);
-   ChartRedraw(0);
+   ReleaseMarkets();
+   if(ledger!=INVALID_HANDLE)
+      FileClose(ledger);
+   if(lease!=INVALID_HANDLE)
+      FileClose(lease);
+   ObjectsDeleteAll(0,"QTE_");
+   Comment("");
 }
 
-//+------------------------------------------------------------------+
-//| Timer function                                                   |
-//+------------------------------------------------------------------+
-void OnTimer()
+void Pump(const bool chartTick)
 {
-   if(!TerminalInfoInteger(TERMINAL_CONNECTED) && !MQLInfoInteger(MQL_TESTER))
-      g_state = STATE_DISCONNECTED;
-   else if(g_state == STATE_DISCONNECTED)
+   if(!AllowedAccount() || (!tester && !TerminalInfoInteger(TERMINAL_CONNECTED)))
    {
-      ReconcilePositions();
-      g_state = STATE_SCANNING;
+      statusText="Disconnected or unsupported account";
+      DrawPanel(false);
+      return;
    }
 
-   if(InpShowDashboard)
-      UpdateDashboard();
+   const bool ready=RefreshRisk();
+   if((dailyLock || emergency || finishFlatten) && CanSend() && GetTickCount64()>=nextFlatten)
+   {
+      nextFlatten=GetTickCount64()+1000;
+      if(FlattenOwned())
+         finishFlatten=false;
+   }
+
+   if(ready && !dailyLock && !emergency && !finishFlatten && CanSend())
+      ManagePositions();
+
+   for(int i=0;i<ArraySize(markets);i++)
+   {
+      if(chartTick && markets[i].symbol!=_Symbol)
+         continue;
+      ProcessMarket(i,ready && running && CanSend() && !finishFlatten);
+   }
+   DrawPanel(false);
 }
 
-//+------------------------------------------------------------------+
-//| Main Tick Execution Engine                                       |
-//+------------------------------------------------------------------+
 void OnTick()
 {
-   if(g_emergency_stop)
-   {
-      g_state = STATE_EMERGENCY_STOP;
-      return;
-   }
-
-   if(!ExtSym.RefreshRates())
-      return;
-
-   MqlTick tick;
-   if(!SymbolInfoTick(g_symbol, tick))
-      return;
-
-   if(tick.bid <= 0.0 || tick.ask <= 0.0 || tick.ask < tick.bid)
-      return;
-
-   CheckDailyReset();
-   if(!CheckRiskGuards())
-   {
-      g_state = STATE_RISK_LOCK;
-      return;
-   }
-   else if(g_state == STATE_RISK_LOCK && !g_emergency_stop)
-   {
-      g_state = STATE_SCANNING;
-   }
-
-   ReconcilePositions();
-
-   // 1. Manage Open Positions with Wide Gold Trailing Stop
-   if(g_tracked_count > 0)
-      ManageOpenPositions(tick);
-
-   if(!InpTradingEnabled || g_state == STATE_RISK_LOCK || g_order_pending)
-      return;
-
-   // 2. Evaluate M15/M5 Closed-Candle Pullback Confirmation
-   EvaluateSwingPullbackEntry(tick);
-
-   if(InpShowDashboard && MQLInfoInteger(MQL_VISUAL_MODE))
-      UpdateDashboard();
+   Pump(true);
 }
 
-//+------------------------------------------------------------------+
-//| Helper to Read Single Indicator Value                            |
-//+------------------------------------------------------------------+
-double GetIndVal(int handle, int shift)
+void OnTimer()
 {
-   double buf[1];
-   if(CopyBuffer(handle, 0, shift, 1, buf) <= 0)
-      return 0.0;
-   return buf[0];
+   Pump(false);
 }
 
-//+------------------------------------------------------------------+
-//| Convert $10 USD/USC to Points With Exact Broker Safeguard        |
-//+------------------------------------------------------------------+
-int MoneyToPoints(double money_amount, double lot)
-{
-   double point     = ExtSym.Point();
-   double tick_val  = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
-   if(tick_val <= 0.0)
-      tick_val = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tick_sz   = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
-   double contract  = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-
-   int pts = InpFallbackSLPoints;
-
-   if(point > 0.0 && tick_val > 0.0 && tick_sz > 0.0 && lot > 0.0)
-   {
-      double pt_val_per_lot = tick_val * (point / tick_sz);
-      double cost_per_point = pt_val_per_lot * lot;
-      if(cost_per_point > 0.0)
-         pts = (int)MathCeil(money_amount / cost_per_point);
-   }
-
-   // Sanity guard: if broker tester reports corrupt tick_value causing > 5000 pts for $10 on 0.01 lot,
-   // compute directly from Contract Size (for XAUUSD 100 oz * 0.01 lot = $1 per $1 move = $0.001/pt -> 10,000 pts if 3-digit, 1,000 pts if 2-digit)
-   if(contract > 0.0 && point > 0.0 && lot > 0.0)
-   {
-      double direct_cost_per_pt = contract * point * lot;
-      if(direct_cost_per_pt > 0.0)
-      {
-         int direct_pts = (int)MathCeil(money_amount / direct_cost_per_pt);
-         if(pts > direct_pts * 2 || pts < direct_pts / 2)
-            pts = direct_pts;
-      }
-   }
-
-   return MathMax(200, pts);
-}
-
-//+------------------------------------------------------------------+
-//| M15 Macro Trend + M5 Closed-Candle Pullback Confirmation Engine  |
-//+------------------------------------------------------------------+
-void EvaluateSwingPullbackEntry(const MqlTick &tick)
-{
-   double point = ExtSym.Point();
-   if(point <= 0.0) return;
-
-   long spread_pts = (long)MathRound((tick.ask - tick.bid) / point);
-   if(spread_pts > InpMaxSpreadPoints)
-   {
-      g_signal_status = "HIGH SPREAD (" + IntegerToString(spread_pts) + ")";
-      return;
-   }
-
-   // Read M15 Macro Trend & M5 Confirmed Closed Bar [1] Indicators
-   double ema21_m15 = GetIndVal(g_h_ema_fast_m15, 1);
-   double ema55_m15 = GetIndVal(g_h_ema_slow_m15, 1);
-   double ema200_m15= GetIndVal(g_h_ema_200_m15, 1);
-
-   double ema21_m5  = GetIndVal(g_h_ema_fast_m5, 1);
-   double ema55_m5  = GetIndVal(g_h_ema_slow_m5, 1);
-   double rsi_m5    = GetIndVal(g_h_rsi_m5, 1);
-   double atr_m5    = GetIndVal(g_h_atr_m5, 1);
-
-   if(ema21_m15 == 0.0 || ema200_m15 == 0.0 || ema21_m5 == 0.0 || atr_m5 == 0.0)
-      return;
-
-   g_current_atr_pts = atr_m5 / point;
-   g_current_rsi_m5  = rsi_m5;
-
-   if(g_current_atr_pts < InpMinATRPointsM5)
-   {
-      g_signal_status = "DEAD MARKET";
-      return;
-   }
-   if(g_current_atr_pts > InpMaxATRPointsM5)
-   {
-      g_signal_status = "EXTREME SPIKE";
-      return;
-   }
-
-   // Strict Multi-Timeframe Structural Alignment
-   bool bull_trend = (tick.bid > ema200_m15) && (ema21_m15 > ema55_m15) && (ema21_m5 > ema55_m5);
-   bool bear_trend = (tick.bid < ema200_m15) && (ema21_m15 < ema55_m15) && (ema21_m5 < ema55_m5);
-
-   if(bull_trend)
-      g_macro_bias = "UPTREND (M15/M5)";
-   else if(bear_trend)
-      g_macro_bias = "DOWNTREND (M15/M5)";
-   else
-   {
-      g_macro_bias = "SIDEWAYS / MIXED";
-      g_signal_status = "WAIT TREND ALIGN";
-      return;
-   }
-
-   // Count active layers
-   int buy_layers = 0, sell_layers = 0;
-   double highest_buy_entry = -DBL_MAX;
-   double lowest_sell_entry = DBL_MAX;
-
-   for(int i = 0; i < g_tracked_count; i++)
-   {
-      if(g_tracked[i].type == POSITION_TYPE_BUY)
-      {
-         buy_layers++;
-         if(g_tracked[i].open_price > highest_buy_entry)
-            highest_buy_entry = g_tracked[i].open_price;
-      }
-      else if(g_tracked[i].type == POSITION_TYPE_SELL)
-      {
-         sell_layers++;
-         if(g_tracked[i].open_price < lowest_sell_entry)
-            lowest_sell_entry = g_tracked[i].open_price;
-      }
-   }
-
-   // Cooldown after exit to prevent revenge/churn trading
-   datetime now = TimeCurrent();
-   if(buy_layers == 0 && sell_layers == 0 && g_last_exit_time > 0)
-   {
-      long elapsed_sec = (long)(now - g_last_exit_time);
-      long req_sec     = InpMinCooldownMinutes * 60;
-      if(elapsed_sec < req_sec)
-      {
-         g_signal_status = "COOLDOWN " + IntegerToString((req_sec - elapsed_sec) / 60 + 1) + "m";
-         return;
-      }
-   }
-
-   // M5 Closed Candle [1] Price Action (Pullback Rejection Pattern)
-   datetime bar1_time = iTime(g_symbol, InpEntryTimeframe, 1);
-   double open1  = iOpen(g_symbol, InpEntryTimeframe, 1);
-   double close1 = iClose(g_symbol, InpEntryTimeframe, 1);
-   double low1   = iLow(g_symbol, InpEntryTimeframe, 1);
-   double high1  = iHigh(g_symbol, InpEntryTimeframe, 1);
-
-   bool allow_layering = (InpExecutionMode == MODE_TREND_LAYERING && InpEnableTrendLayering);
-   int max_allowed = allow_layering ? MathMax(1, InpMaxLayers) : 1;
-   long stops_level = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
-
-   // =================================================================
-   // BUY ENGINE: Uptrend + Pullback to M5 EMA21 + Bullish Candle Close
-   // =================================================================
-   if(InpEnableBuy && bull_trend && sell_layers == 0 && buy_layers < max_allowed)
-   {
-      if(buy_layers == 0)
-      {
-         bool touched_ema_zone = (low1 <= ema21_m5 + atr_m5 * 0.35) && (close1 > ema21_m5);
-         bool bullish_candle   = (close1 > open1) && ((close1 - open1) >= atr_m5 * 0.15);
-         bool rsi_pullback_ok  = (rsi_m5 >= InpRSIBuyPullbackMin && rsi_m5 <= InpRSIBuyPullbackMax);
-
-         if(bar1_time != g_last_entry_bar_time && touched_ema_zone && bullish_candle && rsi_pullback_ok)
-         {
-            double lot = CalculateLayerLot(0);
-            int sl_pts = (int)MathMax((double)(stops_level + 30), (double)MoneyToPoints(InpStopLossMoney, lot));
-            double sl  = NormalizePrice(tick.ask - sl_pts * point);
-            double tp  = InpEnableTakeProfit ? NormalizePrice(tick.ask + (sl_pts * InpRiskRewardRatio) * point) : 0.0;
-
-            g_signal_status = "BUY PULLBACK OK";
-            if(ExecuteMarketOrder(ORDER_TYPE_BUY, lot, tick.ask, sl, tp, "VulcaresVx_BUY_L1"))
-            {
-               g_last_entry_bar_time = bar1_time;
-               g_state = STATE_ENTRY_PENDING;
-            }
-         }
-         else
-         {
-            g_signal_status = !rsi_pullback_ok ? "RSI OVERBOUGHT" : "WAIT M5 PULLBACK";
-         }
-      }
-      else if(allow_layering)
-      {
-         double step_pts = (tick.ask - highest_buy_entry) / point;
-         if(step_pts >= InpLayerStepPoints && close1 > open1 && bar1_time != g_last_entry_bar_time)
-         {
-            double lot = CalculateLayerLot(buy_layers);
-            int sl_pts = (int)MathMax((double)(stops_level + 30), (double)MoneyToPoints(InpStopLossMoney, lot));
-            double sl  = NormalizePrice(tick.ask - sl_pts * point);
-            double tp  = InpEnableTakeProfit ? NormalizePrice(tick.ask + (sl_pts * InpRiskRewardRatio) * point) : 0.0;
-
-            string cmt = "VulcaresVx_BUY_L" + IntegerToString(buy_layers + 1);
-            if(ExecuteMarketOrder(ORDER_TYPE_BUY, lot, tick.ask, sl, tp, cmt))
-            {
-               g_last_entry_bar_time = bar1_time;
-               g_state = STATE_LAYERING_ACTIVE;
-            }
-         }
-      }
-   }
-
-   // =================================================================
-   // SELL ENGINE: Downtrend + Pullback to M5 EMA21 + Bearish Candle Close
-   // =================================================================
-   if(InpEnableSell && bear_trend && buy_layers == 0 && sell_layers < max_allowed)
-   {
-      if(sell_layers == 0)
-      {
-         bool touched_ema_zone = (high1 >= ema21_m5 - atr_m5 * 0.35) && (close1 < ema21_m5);
-         bool bearish_candle   = (close1 < open1) && ((open1 - close1) >= atr_m5 * 0.15);
-         bool rsi_pullback_ok  = (rsi_m5 >= InpRSISellPullbackMin && rsi_m5 <= InpRSISellPullbackMax);
-
-         if(bar1_time != g_last_entry_bar_time && touched_ema_zone && bearish_candle && rsi_pullback_ok)
-         {
-            double lot = CalculateLayerLot(0);
-            int sl_pts = (int)MathMax((double)(stops_level + 30), (double)MoneyToPoints(InpStopLossMoney, lot));
-            double sl  = NormalizePrice(tick.bid + sl_pts * point);
-            double tp  = InpEnableTakeProfit ? NormalizePrice(tick.bid - (sl_pts * InpRiskRewardRatio) * point) : 0.0;
-
-            g_signal_status = "SELL PULLBACK OK";
-            if(ExecuteMarketOrder(ORDER_TYPE_SELL, lot, tick.bid, sl, tp, "VulcaresVx_SELL_L1"))
-            {
-               g_last_entry_bar_time = bar1_time;
-               g_state = STATE_ENTRY_PENDING;
-            }
-         }
-         else
-         {
-            g_signal_status = !rsi_pullback_ok ? "RSI OVERSOLD" : "WAIT M5 PULLBACK";
-         }
-      }
-      else if(allow_layering)
-      {
-         double step_pts = (lowest_sell_entry - tick.bid) / point;
-         if(step_pts >= InpLayerStepPoints && close1 < open1 && bar1_time != g_last_entry_bar_time)
-         {
-            double lot = CalculateLayerLot(sell_layers);
-            int sl_pts = (int)MathMax((double)(stops_level + 30), (double)MoneyToPoints(InpStopLossMoney, lot));
-            double sl  = NormalizePrice(tick.bid + sl_pts * point);
-            double tp  = InpEnableTakeProfit ? NormalizePrice(tick.bid - (sl_pts * InpRiskRewardRatio) * point) : 0.0;
-
-            string cmt = "VulcaresVx_SELL_L" + IntegerToString(sell_layers + 1);
-            if(ExecuteMarketOrder(ORDER_TYPE_SELL, lot, tick.bid, sl, tp, cmt))
-            {
-               g_last_entry_bar_time = bar1_time;
-               g_state = STATE_LAYERING_ACTIVE;
-            }
-         }
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Wide Gold Trailing Stop Engine                                   |
-//+------------------------------------------------------------------+
-void ManageOpenPositions(const MqlTick &tick)
-{
-   if(!InpEnableTrailingStop)
-      return;
-
-   double point = ExtSym.Point();
-   if(point <= 0.0) return;
-
-   long stops_level  = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   long freeze_level = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_FREEZE_LEVEL);
-   double min_stop_dist = MathMax((double)stops_level, 20.0) * point;
-   double freeze_dist   = (double)freeze_level * point;
-
-   for(int i = 0; i < g_tracked_count; i++)
-   {
-      ulong ticket = g_tracked[i].ticket;
-      if(!PositionSelectByTicket(ticket))
-         continue;
-
-      int    pos_type   = (int)PositionGetInteger(POSITION_TYPE);
-      double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
-      double current_sl = PositionGetDouble(POSITION_SL);
-      double current_tp = PositionGetDouble(POSITION_TP);
-
-      if(pos_type == POSITION_TYPE_BUY)
-      {
-         if(tick.bid > g_tracked[i].highest_bid)
-            g_tracked[i].highest_bid = tick.bid;
-
-         double peak_profit_pts = (g_tracked[i].highest_bid - open_price) / point;
-         if(peak_profit_pts >= InpTrailingStartPts)
-         {
-            double trail_sl = NormalizePrice(g_tracked[i].highest_bid - InpTrailingDistancePts * point);
-            if(trail_sl > open_price && (current_sl == 0.0 || trail_sl >= current_sl + InpTrailingStepPts * point))
-            {
-               if((tick.bid - trail_sl) >= min_stop_dist &&
-                  (current_sl == 0.0 || MathAbs(tick.bid - current_sl) > freeze_dist))
-               {
-                  if(ModifyPositionSL(ticket, trail_sl, current_tp))
-                  {
-                     g_tracked[i].current_sl = trail_sl;
-                     g_state = STATE_TRAILING_ACTIVE;
-                     if(InpShowTradeVisuals)
-                        DrawTrailingLine(ticket, trail_sl);
-                  }
-               }
-            }
-         }
-      }
-      else if(pos_type == POSITION_TYPE_SELL)
-      {
-         if(tick.ask < g_tracked[i].lowest_ask || g_tracked[i].lowest_ask == 0.0)
-            g_tracked[i].lowest_ask = tick.ask;
-
-         double peak_profit_pts = (open_price - g_tracked[i].lowest_ask) / point;
-         if(peak_profit_pts >= InpTrailingStartPts)
-         {
-            double trail_sl = NormalizePrice(g_tracked[i].lowest_ask + InpTrailingDistancePts * point);
-            if(trail_sl < open_price && (current_sl == 0.0 || trail_sl <= current_sl - InpTrailingStepPts * point))
-            {
-               if((trail_sl - tick.ask) >= min_stop_dist &&
-                  (current_sl == 0.0 || MathAbs(current_sl - tick.ask) > freeze_dist))
-               {
-                  if(ModifyPositionSL(ticket, trail_sl, current_tp))
-                  {
-                     g_tracked[i].current_sl = trail_sl;
-                     g_state = STATE_TRAILING_ACTIVE;
-                     if(InpShowTradeVisuals)
-                        DrawTrailingLine(ticket, trail_sl);
-                  }
-               }
-            }
-         }
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Trade Transaction Reconciliation                                 |
-//+------------------------------------------------------------------+
-void OnTradeTransaction(const MqlTradeTransaction &trans,
-                        const MqlTradeRequest &request,
+void OnTradeTransaction(const MqlTradeTransaction &transaction,const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
-   if(trans.symbol != g_symbol)
-      return;
-
-   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   if(transaction.type==TRADE_TRANSACTION_DEAL_ADD)
    {
-      g_order_pending = false;
-      if(HistoryDealSelect(trans.deal))
-      {
-         long magic = HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
-         if(magic == (long)InpMagicNumber)
-         {
-            long entry_type = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-            double price    = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
-            long deal_type  = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
-
-            if(entry_type == DEAL_ENTRY_OUT || entry_type == DEAL_ENTRY_INOUT)
-            {
-               double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) +
-                               HistoryDealGetDouble(trans.deal, DEAL_SWAP) +
-                               HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
-               g_last_exit_time = TimeCurrent();
-               g_state = STATE_SCANNING;
-
-               if(InpShowTradeVisuals)
-                  DrawExitMarker(trans.deal, price, profit);
-            }
-            else if(entry_type == DEAL_ENTRY_IN)
-            {
-               g_state = STATE_POSITION_ACTIVE;
-               if(InpShowTradeVisuals)
-                  DrawEntryMarker(trans.deal, price, (int)deal_type);
-            }
-         }
-      }
-      ReconcilePositions();
-   }
-   else if(trans.type == TRADE_TRANSACTION_REQUEST)
-   {
-      if(result.retcode != TRADE_RETCODE_DONE && result.retcode != TRADE_RETCODE_PLACED)
-         g_order_pending = false;
+      LogExecution(transaction.symbol,"DEAL",0,result.retcode,transaction.order,
+                   transaction.deal,transaction.price,transaction.volume,0,0,0);
+      ReconcileDeal(transaction.deal);
    }
 }
 
-//+------------------------------------------------------------------+
-//| Chart Event Handler (Emergency Stop & Reset Button)              |
-//+------------------------------------------------------------------+
-void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam)
 {
-   if(id == CHARTEVENT_OBJECT_CLICK)
-   {
-      if(sparam == g_prefix + "BTN_ESTOP")
-      {
-         g_emergency_stop = !g_emergency_stop;
-         if(g_emergency_stop)
-         {
-            CloseAllEA_Positions("Emergency Stop Triggered");
-            g_state = STATE_EMERGENCY_STOP;
-         }
-         else
-         {
-            g_day_start_balance = AccountInfoDouble(ACCOUNT_BALANCE);
-            g_peak_equity = AccountInfoDouble(ACCOUNT_EQUITY);
-            g_state = STATE_SCANNING;
-         }
-         UpdateDashboard();
-      }
-   }
+   if(id==CHARTEVENT_OBJECT_CLICK)
+      HandleButton(sparam);
 }
 
-void ReconcilePositions()
+double OnTester()
 {
-   PositionTracker updated[20];
-   int count = 0;
-
-   int total = PositionsTotal();
-   for(int i = 0; i < total; i++)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
-
-      if(PositionGetString(POSITION_SYMBOL) != g_symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
-
-      if(count < 20)
-      {
-         updated[count].ticket      = ticket;
-         updated[count].type        = (int)PositionGetInteger(POSITION_TYPE);
-         updated[count].open_price  = PositionGetDouble(POSITION_PRICE_OPEN);
-         updated[count].volume      = PositionGetDouble(POSITION_VOLUME);
-         updated[count].current_sl  = PositionGetDouble(POSITION_SL);
-         updated[count].open_time   = (datetime)PositionGetInteger(POSITION_TIME);
-
-         updated[count].highest_bid = updated[count].open_price;
-         updated[count].lowest_ask  = updated[count].open_price;
-         for(int j = 0; j < g_tracked_count; j++)
-         {
-            if(g_tracked[j].ticket == ticket)
-            {
-               updated[count].highest_bid = g_tracked[j].highest_bid;
-               updated[count].lowest_ask  = g_tracked[j].lowest_ask;
-               break;
-            }
-         }
-         count++;
-      }
-   }
-
-   g_tracked_count = count;
-   for(int k = 0; k < count; k++)
-      g_tracked[k] = updated[k];
+   PrintFormat("QTE TESTER | trades %.0f | net %.2f | gross profit %.2f | gross loss %.2f | equity DD %.2f%% | profit factor %.4f",
+               TesterStatistics(STAT_TRADES),TesterStatistics(STAT_PROFIT),
+               TesterStatistics(STAT_GROSS_PROFIT),TesterStatistics(STAT_GROSS_LOSS),
+               TesterStatistics(STAT_EQUITY_DDREL_PERCENT),TesterStatistics(STAT_PROFIT_FACTOR));
+   return TesterStatistics(STAT_PROFIT);
 }
-
-bool ExecuteMarketOrder(ENUM_ORDER_TYPE order_type, double lot, double price, double sl, double tp, string comment)
-{
-   double cur_exposure = 0.0;
-   for(int i = 0; i < g_tracked_count; i++)
-      cur_exposure += g_tracked[i].volume;
-
-   if(cur_exposure + lot > InpMaxExposureLots + 1e-6)
-      return false;
-
-   double margin_req = 0.0;
-   if(!OrderCalcMargin(order_type, g_symbol, lot, price, margin_req))
-      return false;
-
-   double free_margin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
-   if(free_margin <= margin_req)
-      return false;
-
-   g_order_pending = true;
-   bool res = false;
-   if(order_type == ORDER_TYPE_BUY)
-      res = ExtTrade.Buy(lot, g_symbol, price, sl, tp, comment);
-   else if(order_type == ORDER_TYPE_SELL)
-      res = ExtTrade.Sell(lot, g_symbol, price, sl, tp, comment);
-
-   if(!res)
-   {
-      g_order_pending = false;
-      Print("[Vulcares Vx] Order rejected. Retcode: ", ExtTrade.ResultRetcode(), " - ", ExtTrade.ResultRetcodeDescription());
-      return false;
-   }
-   return true;
-}
-
-bool ModifyPositionSL(ulong ticket, double new_sl, double tp)
-{
-   if(!ExtTrade.PositionModify(ticket, new_sl, tp))
-   {
-      uint rc = ExtTrade.ResultRetcode();
-      if(rc != TRADE_RETCODE_NO_CHANGES)
-         Print("[Vulcares Vx] SL Modify failed ticket ", ticket, " Retcode: ", rc);
-      return false;
-   }
-   return true;
-}
-
-void CheckDailyReset()
-{
-   MqlDateTime dt;
-   TimeCurrent(dt);
-   if(dt.day_of_year != g_current_day)
-   {
-      g_current_day = dt.day_of_year;
-      g_day_start_balance = AccountInfoDouble(ACCOUNT_BALANCE);
-      g_peak_equity       = AccountInfoDouble(ACCOUNT_EQUITY);
-      if(g_state == STATE_RISK_LOCK && !g_emergency_stop)
-         g_state = STATE_SCANNING;
-   }
-}
-
-bool CheckRiskGuards()
-{
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   if(equity > g_peak_equity)
-      g_peak_equity = equity;
-
-   if(InpMaxDailyLossPercent > 0.0 && g_day_start_balance > 0.0)
-   {
-      double daily_dd_pct = ((g_day_start_balance - equity) / g_day_start_balance) * 100.0;
-      if(daily_dd_pct >= InpMaxDailyLossPercent)
-         return false;
-   }
-
-   if(InpMaxEquityDDPercent > 0.0 && g_peak_equity > 0.0)
-   {
-      double eq_dd_pct = ((g_peak_equity - equity) / g_peak_equity) * 100.0;
-      if(eq_dd_pct >= InpMaxEquityDDPercent)
-         return false;
-   }
-
-   double margin = AccountInfoDouble(ACCOUNT_MARGIN);
-   if(margin > 0.0)
-   {
-      double margin_level = (equity / margin) * 100.0;
-      if(margin_level < InpMinFreeMarginPercent)
-         return false;
-   }
-
-   return true;
-}
-
-void CloseAllEA_Positions(string reason)
-{
-   Print("[Vulcares Vx] Closing all EA positions: ", reason);
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0 && PositionSelectByTicket(ticket))
-      {
-         if(PositionGetString(POSITION_SYMBOL) == g_symbol &&
-            (ulong)PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
-         {
-            ExtTrade.PositionClose(ticket, InpMaxSlippagePoints);
-         }
-      }
-   }
-}
-
-double CalculateLayerLot(int layer_index)
-{
-   double mult = MathPow(MathMax(0.1, InpLayerLotMultiplier), layer_index);
-   return NormalizeLot(InpBaseLot * mult);
-}
-
-double NormalizeLot(double lot)
-{
-   double min_lot  = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN);
-   double max_lot  = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MAX);
-   double step_lot = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_STEP);
-
-   if(step_lot <= 0.0) step_lot = 0.01;
-   double norm = MathFloor((lot + 1e-9) / step_lot) * step_lot;
-   norm = MathMax(min_lot, MathMin(max_lot, norm));
-   return NormalizeDouble(norm, 2);
-}
-
-double NormalizePrice(double price)
-{
-   double tick_size = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
-   int digits = (int)SymbolInfoInteger(g_symbol, SYMBOL_DIGITS);
-   if(tick_size > 0.0)
-      return NormalizeDouble(MathRound(price / tick_size) * tick_size, digits);
-   return NormalizeDouble(price, digits);
-}
-
-void DrawEntryMarker(ulong deal, double price, int deal_type)
-{
-   string name = g_prefix + "ENT_" + IntegerToString(deal);
-   ObjectCreate(0, name, OBJ_ARROW, 0, TimeCurrent(), price);
-   ObjectSetInteger(0, name, OBJPROP_ARROWCODE, (deal_type == DEAL_TYPE_BUY) ? 233 : 234);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, (deal_type == DEAL_TYPE_BUY) ? clrDodgerBlue : clrTomato);
-   ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-}
-
-void DrawExitMarker(ulong deal, double price, double profit)
-{
-   string name = g_prefix + "EXT_" + IntegerToString(deal);
-   ObjectCreate(0, name, OBJ_ARROW, 0, TimeCurrent(), price);
-   ObjectSetInteger(0, name, OBJPROP_ARROWCODE, 251);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, (profit >= 0.0) ? clrLimeGreen : clrOrangeRed);
-   ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-}
-
-void DrawTrailingLine(ulong ticket, double sl_price)
-{
-   string name = g_prefix + "TSL_" + IntegerToString(ticket);
-   if(ObjectFind(0, name) < 0)
-   {
-      ObjectCreate(0, name, OBJ_HLINE, 0, 0, sl_price);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, clrCrimson);
-      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DASHDOT);
-      ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-   }
-   else
-   {
-      ObjectSetDouble(0, name, OBJPROP_PRICE, sl_price);
-   }
-}
-
-void CreateDashboard()
-{
-   int x = 14, y = 24, w = 295, h = 415;
-
-   string bg = g_prefix + "BG";
-   ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, bg, OBJPROP_XSIZE, w);
-   ObjectSetInteger(0, bg, OBJPROP_YSIZE, h);
-   ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, C'14,17,22');
-   ObjectSetInteger(0, bg, OBJPROP_BORDER_COLOR, C'48,54,61');
-   ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-   ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-
-   CreateLabel("TITLE", x + 12, y + 10, "VULCARES VX v3.0  |  M15/M5 SWING", clrGold, 10, true);
-   CreateLabel("SUB",   x + 12, y + 28, "M5 Pullback + RSI + 1:2.2 R:R Target", clrDarkGray, 8, false);
-
-   string keys[] = {
-      "EA Status:", "Trend (M15/M5):", "Signal Gate:", "M5 RSI (14):",
-      "M5 ATR (Pts):", "Active Layers:", "Total Active Lot:", "Fixed SL ($10):",
-      "Target TP (R:R):", "Floating P/L:", "Trailing Status:", "Tightest SL:",
-      "Locked Profit:", "Current Spread:", "Daily P/L:", "Actual Win Rate:"
-   };
-
-   for(int i = 0; i < ArraySize(keys); i++)
-   {
-      int row_y = y + 52 + i * 19;
-      CreateLabel("K_" + IntegerToString(i), x + 12,  row_y, keys[i], clrSilver, 8, false);
-      CreateLabel("V_" + IntegerToString(i), x + 150, row_y, "--",    clrWhite,  8, true);
-   }
-
-   string btn = g_prefix + "BTN_ESTOP";
-   ObjectCreate(0, btn, OBJ_BUTTON, 0, 0, 0);
-   ObjectSetInteger(0, btn, OBJPROP_XDISTANCE, x + 12);
-   ObjectSetInteger(0, btn, OBJPROP_YDISTANCE, y + h - 34);
-   ObjectSetInteger(0, btn, OBJPROP_XSIZE, w - 24);
-   ObjectSetInteger(0, btn, OBJPROP_YSIZE, 24);
-   ObjectSetString(0, btn, OBJPROP_TEXT, "EMERGENCY STOP");
-   ObjectSetInteger(0, btn, OBJPROP_COLOR, clrWhite);
-   ObjectSetInteger(0, btn, OBJPROP_BGCOLOR, C'180,35,35');
-   ObjectSetInteger(0, btn, OBJPROP_FONTSIZE, 8);
-}
-
-void CreateLabel(string suffix, int x, int y, string text, color clr, int font_size, bool bold)
-{
-   string name = g_prefix + suffix;
-   ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-   ObjectSetString(0, name, OBJPROP_TEXT, text);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, font_size);
-   ObjectSetString(0, name, OBJPROP_FONT, bold ? "Segoe UI Semibold" : "Segoe UI");
-   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-}
-
-void UpdateDashboard()
-{
-   double float_pl = 0.0, total_lot = 0.0, tight_sl = 0.0, locked_pl = 0.0;
-   double point = ExtSym.Point();
-   int digits = (int)SymbolInfoInteger(g_symbol, SYMBOL_DIGITS);
-
-   for(int i = 0; i < g_tracked_count; i++)
-   {
-      if(PositionSelectByTicket(g_tracked[i].ticket))
-      {
-         float_pl  += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-         total_lot += g_tracked[i].volume;
-         double sl  = PositionGetDouble(POSITION_SL);
-         double op  = PositionGetDouble(POSITION_PRICE_OPEN);
-         int ptype  = (int)PositionGetInteger(POSITION_TYPE);
-
-         if(sl > 0.0)
-         {
-            if(tight_sl == 0.0) tight_sl = sl;
-            else if(ptype == POSITION_TYPE_BUY && sl > tight_sl) tight_sl = sl;
-            else if(ptype == POSITION_TYPE_SELL && sl < tight_sl) tight_sl = sl;
-
-            if(point > 0.0)
-            {
-               if(ptype == POSITION_TYPE_BUY && sl > op) locked_pl += (sl - op) / point;
-               else if(ptype == POSITION_TYPE_SELL && sl < op) locked_pl += (op - sl) / point;
-            }
-         }
-      }
-   }
-
-   int sl_pts_10   = MoneyToPoints(InpStopLossMoney, InpBaseLot);
-   int tp_pts      = (int)MathRound(sl_pts_10 * InpRiskRewardRatio);
-   double daily_pl = AccountInfoDouble(ACCOUNT_EQUITY) - g_day_start_balance;
-   long spread_pts = (point > 0.0) ? (long)MathRound((ExtSym.Ask() - ExtSym.Bid()) / point) : 0;
-
-   int wins = 0, total_closed = 0;
-   if(HistorySelect(0, TimeCurrent()))
-   {
-      int deals = HistoryDealsTotal();
-      for(int d = 0; d < deals; d++)
-      {
-         ulong dticket = HistoryDealGetTicket(d);
-         if(HistoryDealGetInteger(dticket, DEAL_MAGIC) == (long)InpMagicNumber &&
-            HistoryDealGetInteger(dticket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
-         {
-            total_closed++;
-            if(HistoryDealGetDouble(dticket, DEAL_PROFIT) > 0.0) wins++;
-         }
-      }
-   }
-   double wr = (total_closed > 0) ? (100.0 * wins / total_closed) : 0.0;
-
-   string state_str = EnumToString(g_state);
-   StringReplace(state_str, "STATE_", "");
-
-   SetVal(0, state_str, (g_state == STATE_RISK_LOCK || g_state == STATE_EMERGENCY_STOP) ? clrRed : clrLimeGreen);
-   SetVal(1, g_macro_bias, (g_macro_bias == "UPTREND (M15/M5)") ? clrLime : (g_macro_bias == "DOWNTREND (M15/M5)" ? clrTomato : clrGray));
-   SetVal(2, g_signal_status, clrGold);
-   SetVal(3, DoubleToString(g_current_rsi_m5, 1), clrWhite);
-   SetVal(4, DoubleToString(g_current_atr_pts, 0) + " pts", clrSilver);
-   SetVal(5, IntegerToString(g_tracked_count) + " / " + IntegerToString(InpMaxLayers), clrWhite);
-   SetVal(6, DoubleToString(total_lot, 2) + " lot", clrWhite);
-   SetVal(7, DoubleToString(InpStopLossMoney, 0) + " " + AccountInfoString(ACCOUNT_CURRENCY) + " (" + IntegerToString(sl_pts_10) + " pts)", clrGold);
-   SetVal(8, InpEnableTakeProfit ? (IntegerToString(tp_pts) + " pts (1:" + DoubleToString(InpRiskRewardRatio, 1) + ")") : "TRAILING ONLY", clrAqua);
-   SetVal(9, DoubleToString(float_pl, 2) + " " + AccountInfoString(ACCOUNT_CURRENCY), (float_pl >= 0.0) ? clrLime : clrTomato);
-   SetVal(10, (g_state == STATE_TRAILING_ACTIVE) ? "TRAILING LOCK" : ((g_tracked_count > 0) ? "ARMED" : "IDLE"), clrGold);
-   SetVal(11, (tight_sl > 0.0) ? DoubleToString(tight_sl, digits) : "NONE", clrCrimson);
-   SetVal(12, "+" + DoubleToString(locked_pl, 0) + " pts", (locked_pl > 0.0) ? clrLime : clrGray);
-   SetVal(13, IntegerToString(spread_pts) + " pts", (spread_pts <= InpMaxSpreadPoints) ? clrSilver : clrRed);
-   SetVal(14, DoubleToString(daily_pl, 2), (daily_pl >= 0.0) ? clrLime : clrTomato);
-   SetVal(15, DoubleToString(wr, 1) + "% (" + IntegerToString(wins) + "/" + IntegerToString(total_closed) + ")", clrAqua);
-
-   ChartRedraw(0);
-}
-
-void SetVal(int idx, string text, color clr)
-{
-   string name = g_prefix + "V_" + IntegerToString(idx);
-   ObjectSetString(0, name, OBJPROP_TEXT, text);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-}
-//+------------------------------------------------------------------+
