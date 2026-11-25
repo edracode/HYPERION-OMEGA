@@ -1,20 +1,10 @@
 #property strict
-#property version "1.00"
+#property version "1.01"
 #property description "Quantum Trading Engine | Strategy Tester and demo"
 
 #include <Trade/Trade.mqh>
 
-// Strategy Tester: verifikasi biaya broker, isi parameter komisi,
-// lalu aktifkan ConfirmCostInputs dan StartOnLoad.
-// Untuk akun demo, verifikasi biaya broker lalu tekan START pada panel.
-
-enum QTERiskMode
-{
-   AGGRESSIVE,
-   SUPER_AGGRESSIVE,
-   ADAPTIVE_AGGRESSIVE
-};
-
+enum QTERiskMode { AGGRESSIVE, SUPER_AGGRESSIVE, ADAPTIVE_AGGRESSIVE };
 input group "Risk and account"
 input QTERiskMode RiskMode=SUPER_AGGRESSIVE;
 input double RiskPerTradeAggressive=4.0;
@@ -44,9 +34,8 @@ input bool ConfirmCostInputs=false;
 input double StopSlippageTicks=3.0;
 input double EntrySlippageTicks=2.0;
 input ulong Magic=761921;
-
 input group "Market and strategies"
-input string Symbols="XAUUSD,EURUSD,BTCUSD";
+input string Symbols="AUTO";
 input ENUM_TIMEFRAMES SignalTimeframe=PERIOD_M1;
 input ENUM_TIMEFRAMES ContextTimeframe=PERIOD_M5;
 input bool EnableMultiSymbol=true;
@@ -87,6 +76,7 @@ int latencyCount=0, latencyNext=0;
 ulong lastPanel=0, nextFlatten=0;
 string statusText="Paused";
 
+
 struct Market
 {
    string symbol;
@@ -98,7 +88,7 @@ struct Market
    double impulse[16];
    int head,count;
    string regime;
-   double regimeScore,score,spread;
+   double regimeScore, score, spread;
 };
 
 struct Signal
@@ -121,89 +111,171 @@ string ResolveSymbol(string name)
 {
    StringTrimLeft(name);
    StringTrimRight(name);
-   if(name==_Symbol || SymbolSelect(name,true))
+   if(name=="")
+      return "";
+
+   bool custom=false;
+   if(SymbolExist(name,custom))
       return name;
 
    const string wanted=Upper(name);
-   string match="";
-   for(int i=0;i<SymbolsTotal(false);i++)
+   const int total=SymbolsTotal(false);
+   string alias="";
+   int matches=0;
+   bool chartMatches=false;
+   for(int i=0;i<total;i++)
    {
       const string candidate=SymbolName(i,false);
-      const string root=Upper(candidate);
-      if(root==wanted)
-         return SymbolSelect(candidate,true) ? candidate : "";
-      if(StringFind(root,wanted)<0)
+      const string upper=Upper(candidate);
+      if(upper==wanted)
+         return candidate;
+      if(StringFind(upper,wanted)<0)
          continue;
-      if(match!="")
-      {
-         Print("QTE: ambiguous broker symbol ",name,"; use the exact name.");
-         return "";
-      }
-      match=candidate;
+      alias=candidate;
+      matches++;
+      if(candidate==_Symbol)
+         chartMatches=true;
    }
-   return match!="" && SymbolSelect(match,true) ? match : "";
+
+   if(chartMatches)
+      return _Symbol;
+   if(matches==1)
+      return alias;
+   if(matches>1)
+      Print("QTE: ambiguous alias ",name,"; use the exact broker symbol.");
+   return "";
+}
+
+void ReleaseMarketIndicators(Market &market)
+{
+   if(market.fastHandle!=INVALID_HANDLE) IndicatorRelease(market.fastHandle);
+   if(market.slowHandle!=INVALID_HANDLE) IndicatorRelease(market.slowHandle);
+   if(market.atrHandle!=INVALID_HANDLE) IndicatorRelease(market.atrHandle);
+   if(market.rsiHandle!=INVALID_HANDLE) IndicatorRelease(market.rsiHandle);
+   if(market.adxHandle!=INVALID_HANDLE) IndicatorRelease(market.adxHandle);
+   if(market.contextFast!=INVALID_HANDLE) IndicatorRelease(market.contextFast);
+   if(market.contextSlow!=INVALID_HANDLE) IndicatorRelease(market.contextSlow);
+   market.fastHandle=INVALID_HANDLE;
+   market.slowHandle=INVALID_HANDLE;
+   market.atrHandle=INVALID_HANDLE;
+   market.rsiHandle=INVALID_HANDLE;
+   market.adxHandle=INVALID_HANDLE;
+   market.contextFast=INVALID_HANDLE;
+   market.contextSlow=INVALID_HANDLE;
+}
+
+bool PrepareMarketIndicators(Market &market)
+{
+   if(market.fastHandle!=INVALID_HANDLE)
+      return true;
+
+   const string s=market.symbol;
+   market.fastHandle=iMA(s,SignalTimeframe,FastEMA,0,MODE_EMA,PRICE_CLOSE);
+   market.slowHandle=iMA(s,SignalTimeframe,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
+   market.atrHandle=iATR(s,SignalTimeframe,14);
+   market.rsiHandle=iRSI(s,SignalTimeframe,14,PRICE_CLOSE);
+   market.adxHandle=iADX(s,SignalTimeframe,14);
+   market.contextFast=iMA(s,ContextTimeframe,FastEMA,0,MODE_EMA,PRICE_CLOSE);
+   market.contextSlow=iMA(s,ContextTimeframe,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
+
+   if(market.fastHandle!=INVALID_HANDLE && market.slowHandle!=INVALID_HANDLE &&
+      market.atrHandle!=INVALID_HANDLE && market.rsiHandle!=INVALID_HANDLE &&
+      market.adxHandle!=INVALID_HANDLE && market.contextFast!=INVALID_HANDLE &&
+      market.contextSlow!=INVALID_HANDLE)
+      return true;
+
+   ReleaseMarketIndicators(market);
+   return false;
+}
+
+void AddMarket(const string symbol)
+{
+   if(symbol=="")
+      return;
+
+   const int count=ArraySize(markets);
+   for(int i=0;i<count;i++)
+      if(markets[i].symbol==symbol)
+         return;
+
+   if(!SymbolSelect(symbol,true))
+   {
+      Print("QTE: could not select ",symbol);
+      return;
+   }
+
+   long mode=0;
+   if(!SymbolInfoInteger(symbol,SYMBOL_TRADE_MODE,mode) ||
+      mode==SYMBOL_TRADE_MODE_DISABLED || mode==SYMBOL_TRADE_MODE_CLOSEONLY)
+      return;
+
+   if(ArrayResize(markets,count+1,128)!=count+1)
+   {
+      Print("QTE: could not allocate market state for ",symbol);
+      return;
+   }
+
+   markets[count].symbol=symbol;
+   markets[count].fastHandle=INVALID_HANDLE;
+   markets[count].slowHandle=INVALID_HANDLE;
+   markets[count].atrHandle=INVALID_HANDLE;
+   markets[count].rsiHandle=INVALID_HANDLE;
+   markets[count].adxHandle=INVALID_HANDLE;
+   markets[count].contextFast=INVALID_HANDLE;
+   markets[count].contextSlow=INVALID_HANDLE;
 }
 
 bool LoadMarkets()
 {
-   string names[];
-   const int n=EnableMultiSymbol ? StringSplit(Symbols,',',names) : 1;
-   if(n<1 || n>40)
-      return false;
+   string source=Symbols;
+   StringTrimLeft(source);
+   StringTrimRight(source);
+   const string mode=Upper(source);
+   const bool autoMode=mode=="" || mode=="AUTO";
 
-   ArrayResize(markets,n);
-   for(int i=0;i<n;i++)
+   if(!EnableMultiSymbol || (autoMode && tester))
+      AddMarket(_Symbol);
+   else if(autoMode || mode=="MARKET_WATCH" || mode=="*")
    {
-      markets[i].fastHandle=INVALID_HANDLE;
-      markets[i].slowHandle=INVALID_HANDLE;
-      markets[i].atrHandle=INVALID_HANDLE;
-      markets[i].rsiHandle=INVALID_HANDLE;
-      markets[i].adxHandle=INVALID_HANDLE;
-      markets[i].contextFast=INVALID_HANDLE;
-      markets[i].contextSlow=INVALID_HANDLE;
-   }
-
-   for(int i=0;i<n;i++)
-   {
-      const string s=EnableMultiSymbol ? ResolveSymbol(names[i]) : _Symbol;
-      if(s=="")
+      const bool selectedOnly=mode!="*";
+      const int total=SymbolsTotal(selectedOnly);
+      for(int i=0;i<total;i++)
       {
-         Print("QTE: unresolved symbol ",names[i]);
-         return false;
+         const string name=SymbolName(i,selectedOnly);
+         bool custom=false;
+         if(!selectedOnly && (!SymbolExist(name,custom) || custom))
+            continue;
+         AddMarket(name);
       }
-      for(int j=0;j<i;j++)
-         if(markets[j].symbol==s)
-            return false;
-
-      markets[i].symbol=s;
-      markets[i].fastHandle=iMA(s,SignalTimeframe,FastEMA,0,MODE_EMA,PRICE_CLOSE);
-      markets[i].slowHandle=iMA(s,SignalTimeframe,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
-      markets[i].atrHandle=iATR(s,SignalTimeframe,14);
-      markets[i].rsiHandle=iRSI(s,SignalTimeframe,14,PRICE_CLOSE);
-      markets[i].adxHandle=iADX(s,SignalTimeframe,14);
-      markets[i].contextFast=iMA(s,ContextTimeframe,FastEMA,0,MODE_EMA,PRICE_CLOSE);
-      markets[i].contextSlow=iMA(s,ContextTimeframe,SlowEMA,0,MODE_EMA,PRICE_CLOSE);
-      if(markets[i].fastHandle==INVALID_HANDLE || markets[i].slowHandle==INVALID_HANDLE ||
-         markets[i].atrHandle==INVALID_HANDLE || markets[i].rsiHandle==INVALID_HANDLE ||
-         markets[i].adxHandle==INVALID_HANDLE || markets[i].contextFast==INVALID_HANDLE ||
-         markets[i].contextSlow==INVALID_HANDLE)
-         return false;
+      AddMarket(_Symbol);
    }
-   return true;
+   else
+   {
+      string names[];
+      const int total=StringSplit(source,',',names);
+      for(int i=0;i<total;i++)
+      {
+         const string symbol=ResolveSymbol(names[i]);
+         if(symbol=="")
+         {
+            Print("QTE: skipped unknown or ambiguous symbol ",names[i]);
+            continue;
+         }
+         AddMarket(symbol);
+      }
+      if(ArraySize(markets)==0)
+         AddMarket(_Symbol);
+   }
+
+   const int loaded=ArraySize(markets);
+   Print("QTE: ",loaded," symbol(s) registered. Chart: ",_Symbol);
+   return loaded>0;
 }
 
 void ReleaseMarkets()
 {
    for(int i=0;i<ArraySize(markets);i++)
-   {
-      IndicatorRelease(markets[i].fastHandle);
-      IndicatorRelease(markets[i].slowHandle);
-      IndicatorRelease(markets[i].atrHandle);
-      IndicatorRelease(markets[i].rsiHandle);
-      IndicatorRelease(markets[i].adxHandle);
-      IndicatorRelease(markets[i].contextFast);
-      IndicatorRelease(markets[i].contextSlow);
-   }
+      ReleaseMarketIndicators(markets[i]);
 }
 
 bool ReadFeature(const int handle,double &value)
@@ -220,6 +292,8 @@ bool RefreshFeatures(Market &market,const datetime currentBar)
 {
    if(market.barTime==currentBar)
       return true;
+   if(!PrepareMarketIndicators(market))
+      return false;
    if(!ReadFeature(market.fastHandle,market.fast) || !ReadFeature(market.slowHandle,market.slow) ||
       !ReadFeature(market.atrHandle,market.atr) || market.atr<=0 ||
       !ReadFeature(market.rsiHandle,market.rsi) || !ReadFeature(market.adxHandle,market.adx) ||
@@ -231,12 +305,10 @@ bool RefreshFeatures(Market &market,const datetime currentBar)
    ArraySetAsSeries(bars,true);
    if(CopyRates(market.symbol,SignalTimeframe,1,BreakoutLookback,bars)!=BreakoutLookback)
       return false;
-
    market.high=bars[0].high;
    market.low=bars[0].low;
    market.previousClose=bars[0].close;
    market.pivot=(bars[0].high+bars[0].low+bars[0].close)/3.0;
-
    double average=0,m2=0;
    for(int i=0;i<BreakoutLookback;i++)
    {
@@ -246,7 +318,6 @@ bool RefreshFeatures(Market &market,const datetime currentBar)
       average+=delta/(i+1);
       m2+=delta*(bars[i].close-average);
    }
-
    market.mean=average;
    market.deviation=MathSqrt(MathMax(0,m2/BreakoutLookback));
    market.barTime=currentBar;
@@ -266,7 +337,6 @@ void Offer(Signal &signals[],const int strategy,const int direction,const double
 {
    if((StrategyMask & (1 << (strategy-1)))==0)
       return;
-
    const int n=ArraySize(signals);
    ArrayResize(signals,n+1);
    signals[n].strategy=strategy;
@@ -284,7 +354,6 @@ void Evaluate(Market &m,const double price,const double prev,Signal &signals[])
    const bool trending=m.adx>=23 && MathAbs(trend)>=0.18;
    const bool range=m.adx<23;
    const bool extreme=MathAbs(price-m.previousClose)>2.7*m.atr;
-
    m.regime=extreme ? "Volatility expansion" :
             (trending ? (trend>0 ? "Bull trend" : "Bear trend") : (range ? "Range" : "Mixed"));
    m.regimeScore=MathMin(100.0,extreme ? MathAbs(price-m.previousClose)/m.atr*25 : m.adx*2);
@@ -292,19 +361,16 @@ void Evaluate(Market &m,const double price,const double prev,Signal &signals[])
       return;
    const double stop=ATRStopMultiple*m.atr;
 
-   // 1. Multi-timeframe trend pullback
    if(trend>0.16 && confirmation>0 && prev<=m.fast && price>m.fast && m.rsi>48)
       Offer(signals,1,1,65,trend,stop,trending);
    if(trend<-0.16 && confirmation<0 && prev>=m.fast && price<m.fast && m.rsi<52)
       Offer(signals,1,-1,65,trend,stop,trending);
 
-   // 2. Range breakout
    if(prev<=m.high && price>m.high && m.rsi>52)
       Offer(signals,2,1,67,trend,stop,!range);
    if(prev>=m.low && price<m.low && m.rsi<48)
       Offer(signals,2,-1,67,trend,stop,!range);
 
-   // 3. Mean reversion
    if(m.deviation>0 && range)
    {
       const double lower=m.mean-1.65*m.deviation;
@@ -315,24 +381,23 @@ void Evaluate(Market &m,const double price,const double prev,Signal &signals[])
          Offer(signals,3,-1,65,(price-m.mean)/m.deviation,stop,true);
    }
 
-   // 4. Tick momentum
    if(m.count>=8 && velocity>0.28 && price>m.pivot && price>prev && m.rsi>52)
       Offer(signals,4,1,62,velocity,stop,trending);
    if(m.count>=8 && velocity<-0.28 && price<m.pivot && price<prev && m.rsi<48)
       Offer(signals,4,-1,62,velocity,stop,trending);
 
-   // 5. Failed breakout
    if(prev<m.low && price>=m.low)
       Offer(signals,5,1,64,(m.low-prev)/m.atr,MathMax(stop,price-prev),range);
    if(prev>m.high && price<=m.high)
       Offer(signals,5,-1,64,(prev-m.high)/m.atr,MathMax(stop,prev-price),range);
 
-   // 6. Volatility compression release
    if(m.high-m.low<4.5*m.atr && confirmation>0 && prev<=m.pivot && price>m.pivot && velocity>0.12)
       Offer(signals,6,1,66,velocity,stop,!extreme);
    if(m.high-m.low<4.5*m.atr && confirmation<0 && prev>=m.pivot && price<m.pivot && velocity<-0.12)
       Offer(signals,6,-1,66,velocity,stop,!extreme);
 }
+
+
 
 double AvailableRisk(const double limit,const double realizedLoss,const double markedLoss,
                      const double stopExposure)
@@ -357,6 +422,7 @@ bool SizeDown(const double minVolume,const double maxVolume,const double step,
    lots=NormalizeDouble(minVolume+MathFloor((cap-minVolume)/step+1e-10)*step,8);
    return lots>=minVolume && lots<=maxVolume && lots*lossPerLot<=cashLimit+1e-7;
 }
+
 
 datetime historyDay=0;
 ulong lastHistoryRead=0;
@@ -406,7 +472,6 @@ bool SaveState()
       storageOK=false;
       return false;
    }
-
    const bool written=FileWriteDouble(lease,1.0)==8 &&
                       FileWriteDouble(lease,(double)sessionDay)==8 &&
                       FileWriteDouble(lease,startEquity)==8 &&
@@ -421,7 +486,6 @@ bool OpenState()
 {
    if(tester)
       return true;
-
    const string filename="QTE_state_"+(string)ServerKey(AccountInfoString(ACCOUNT_SERVER))+
                          "_"+(string)AccountInfoInteger(ACCOUNT_LOGIN)+".bin";
    lease=FileOpen(filename,FILE_COMMON|FILE_BIN|FILE_READ|FILE_WRITE);
@@ -434,7 +498,6 @@ bool OpenState()
       return SaveState();
    if(FileSize(lease)!=40 || FileReadDouble(lease)!=1.0)
       return false;
-
    const double storedDay=FileReadDouble(lease);
    startEquity=FileReadDouble(lease);
    const double lockedFlag=FileReadDouble(lease);
@@ -442,7 +505,6 @@ bool OpenState()
    if(!MathIsValidNumber(storedDay) || storedDay<0 || !MathIsValidNumber(startEquity) ||
       startEquity<0 || (lockedFlag!=0 && lockedFlag!=1) || (emergencyFlag!=0 && emergencyFlag!=1))
       return false;
-
    sessionDay=(datetime)storedDay;
    dailyLock=lockedFlag==1;
    emergency=emergencyFlag==1;
@@ -465,18 +527,15 @@ bool ReadDayHistory(const datetime day,const datetime now)
    const ulong instant=GetTickCount64();
    if(historyValid && historyDay==day && instant-lastHistoryRead<1000)
       return true;
-
    historyValid=false;
    if(!HistorySelect(day,now+1))
       return false;
-
    double net=0,loss=0,cash=0;
    for(int i=0;i<HistoryDealsTotal();i++)
    {
       const ulong ticket=HistoryDealGetTicket(i);
       if(ticket==0)
          return false;
-
       const ENUM_DEAL_TYPE kind=(ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket,DEAL_TYPE);
       const double profit=HistoryDealGetDouble(ticket,DEAL_PROFIT);
       if(kind==DEAL_TYPE_BALANCE || kind==DEAL_TYPE_CREDIT || kind==DEAL_TYPE_BONUS ||
@@ -485,13 +544,11 @@ bool ReadDayHistory(const datetime day,const datetime now)
          cash+=profit;
          continue;
       }
-
       const double dealNet=profit+HistoryDealGetDouble(ticket,DEAL_COMMISSION)+
                            HistoryDealGetDouble(ticket,DEAL_SWAP)+HistoryDealGetDouble(ticket,DEAL_FEE);
       net+=dealNet;
       loss+=MathMax(0.0,-dealNet);
    }
-
    historyDay=day;
    lastHistoryRead=instant;
    historyValid=true;
@@ -527,11 +584,9 @@ bool OwnedPosition()
       return false;
    if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)==ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       return true;
-
    const ulong id=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
    if(id==0 || !HistorySelectByPosition(id))
       return false;
-
    bool found=false;
    for(int i=0;i<HistoryDealsTotal();i++)
    {
@@ -557,22 +612,19 @@ double Cost(const double volume,const bool lossSide)
 bool PositionRisk(double &reserved,double &markedLoss)
 {
    const string symbol=PositionGetString(POSITION_SYMBOL);
-   const double open=PositionGetDouble(POSITION_PRICE_OPEN);
-   const double stop=PositionGetDouble(POSITION_SL);
+   const double open=PositionGetDouble(POSITION_PRICE_OPEN), stop=PositionGetDouble(POSITION_SL);
    const double volume=PositionGetDouble(POSITION_VOLUME);
    const ENUM_ORDER_TYPE side=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ?
                               ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    const double tickSize=SymbolInfoDouble(symbol,SYMBOL_TRADE_TICK_SIZE);
    const double stopFill=stop+(side==ORDER_TYPE_BUY ? -1.0 : 1.0)*tickSize*StopSlippageTicks;
    double terminalProfit=0;
-
    const double marked=PositionGetDouble(POSITION_PROFIT);
    const double swap=PositionGetDouble(POSITION_SWAP);
    markedLoss=MathMax(0.0,-(marked+swap));
    if(stop<=0 || tickSize<=0 || stopFill<=0 ||
       !OrderCalcProfit(side,symbol,volume,open,stopFill,terminalProfit))
       return false;
-
    terminalProfit+=MathMin(0.0,swap)-Cost(volume,true);
    reserved=StopExposure(marked+swap,terminalProfit);
    return true;
@@ -587,7 +639,6 @@ bool RefreshRisk()
       statusText="Account audit unavailable";
       return false;
    }
-
    const double equity=AccountInfoDouble(ACCOUNT_EQUITY);
    if(today!=sessionDay)
    {
@@ -604,26 +655,22 @@ bool RefreshRisk()
          testerFundingDay=today;
          cashFlow=0;
       }
-
       const double openingBalance=AccountInfoDouble(ACCOUNT_BALANCE)-dailyNet-cashFlow;
-      // Use the lower observed or reconstructed value when observation starts late.
+      // When a first observation is late, use the lower observed / reconstructed value.
       startEquity=MathMax(0.0,MathMin(equity-MathMax(0.0,cashFlow),openingBalance));
       dailyLock=false;
       if(!SaveState())
          return false;
    }
-
    dayLimit=startEquity*MaxDailyRiskPercent/100;
    if(!MathIsValidNumber(equity) || startEquity<=0)
       return false;
-
    drawdown=MathMax(0.0,startEquity-(equity-cashFlow));
    maxDrawdown=MathMax(maxDrawdown,drawdown);
    foreignExposure=false;
    exposureOK=true;
    riskToStop=0;
    floatingLoss=0;
-
    for(int i=0;i<PositionsTotal();i++)
    {
       if(PositionGetTicket(i)==0)
@@ -631,7 +678,6 @@ bool RefreshRisk()
          exposureOK=false;
          continue;
       }
-
       const bool own=OwnedPosition();
       if(!own)
          foreignExposure=true;
@@ -645,15 +691,12 @@ bool RefreshRisk()
       riskToStop+=reserved;
       floatingLoss+=markedLoss;
    }
-
-   // This EA uses market entries. Existing orders block new entries.
+   // This EA never intentionally places pending entries. Any existing order blocks new entries.
    if(OrdersTotal()>0)
       foreignExposure=true;
-
    remaining=AvailableRisk(dayLimit,dailyLoss,floatingLoss,riskToStop);
    if(MathMax(drawdown,dailyLoss+floatingLoss)>=dayLimit)
       ActivateDailyLock();
-
    statusText=emergency ? "Emergency stop" : (dailyLock ? "Daily risk lock" :
               (!exposureOK ? "Unprotected exposure" : (foreignExposure ? "Other exposure / order" :
               (!ConfirmCostInputs ? "Confirm broker costs" : (running ? "Scanning" : "Paused")))));
@@ -665,7 +708,6 @@ double RoundPrice(const string s,const double price,const bool up)
    const double tickSize=SymbolInfoDouble(s,SYMBOL_TRADE_TICK_SIZE);
    if(tickSize<=0)
       return 0;
-
    const double steps=price/tickSize;
    return NormalizeDouble((up ? MathCeil(steps-1e-9) : MathFloor(steps+1e-9))*tickSize,
                           (int)SymbolInfoInteger(s,SYMBOL_DIGITS));
@@ -686,12 +728,10 @@ double ClusterBudget(const string symbol,const int direction)
    const string base=SymbolInfoString(symbol,SYMBOL_CURRENCY_BASE);
    const string quote=SymbolInfoString(symbol,SYMBOL_CURRENCY_PROFIT);
    double used=0;
-
    for(int i=0;i<PositionsTotal();i++)
    {
       if(PositionGetTicket(i)==0)
          return 0;
-
       const string other=PositionGetString(POSITION_SYMBOL);
       const string otherBase=SymbolInfoString(other,SYMBOL_CURRENCY_BASE);
       const string otherQuote=SymbolInfoString(other,SYMBOL_CURRENCY_PROFIT);
@@ -700,7 +740,6 @@ double ClusterBudget(const string symbol,const int direction)
          ((base!="" && base==otherBase) || (quote!="" && quote==otherQuote));
       const bool shareOpposite=direction!=otherDirection &&
          ((base!="" && base==otherQuote) || (quote!="" && quote==otherBase));
-
       if(other==symbol || shareSame || shareOpposite)
       {
          double reserved=0,markedLoss=0;
@@ -711,6 +750,7 @@ double ClusterBudget(const string symbol,const int direction)
    }
    return MathMax(0.0,startEquity*MaxCurrencyClusterPercent/100-used);
 }
+
 
 struct TradePlan
 {
@@ -732,7 +772,6 @@ bool SymbolSessionOpen(const string s,const datetime now)
    if(!TimeToStruct(now,fields))
       return false;
    const int seconds=fields.hour*3600+fields.min*60+fields.sec;
-
    for(int backwards=0;backwards<=1;backwards++)
    {
       const ENUM_DAY_OF_WEEK day=(ENUM_DAY_OF_WEEK)((fields.day_of_week+7-backwards)%7);
@@ -761,17 +800,13 @@ bool FillPolicy(const string symbol,ENUM_ORDER_TYPE_FILLING &filling)
       filling=ORDER_FILLING_FOK;
       return true;
    }
-
    if((mask & SYMBOL_FILLING_IOC)==0)
       return false;
    filling=ORDER_FILLING_IOC;
    return true;
 }
 
-string StrategyTag(const int id)
-{
-   return "QTE:S"+IntegerToString(id);
-}
+string StrategyTag(const int id) { return "QTE:S"+IntegerToString(id); }
 
 bool PositionSlot(const string symbol,const int strategy,const int direction)
 {
@@ -785,7 +820,6 @@ bool PositionSlot(const string symbol,const int strategy,const int direction)
          continue;
       if(!hedging || !EnableMultiStrategy)
          return false;
-
       const int held=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY ? 1 : -1;
       const string label=PositionGetString(POSITION_COMMENT);
       if(held!=direction || label==StrategyTag(strategy) || StringFind(label,"QTE:S")!=0)
@@ -838,7 +872,6 @@ bool MakePlan(const Market &market,const MqlTick &tick,const Signal &signal,Trad
                             MathMin(remaining,ClusterBudget(s,d)));
    if(!VolumeAtRisk(s,cap,riskPerLot,plan.lots))
       return false;
-
    double actualStopPnL=0;
    if(!OrderCalcProfit(plan.side,s,plan.lots,assumed,stopFill,actualStopPnL))
       return false;
@@ -867,7 +900,6 @@ bool MakePlan(const Market &market,const MqlTick &tick,const Signal &signal,Trad
       if(high<low)
          return false;
    }
-
    if(!bracketed)
       return false;
    for(int i=0;i<32 && high-low>unit*0.05;i++)
@@ -915,13 +947,11 @@ void ReconcileDeal(const ulong deal)
    const ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal,DEAL_ENTRY);
    if(entry!=DEAL_ENTRY_IN)
       return;
-
    const long id=HistoryDealGetInteger(deal,DEAL_POSITION_ID);
    for(int i=0;i<PositionsTotal();i++)
    {
       if(PositionGetTicket(i)==0 || PositionGetInteger(POSITION_IDENTIFIER)!=id)
          continue;
-
       const string s=PositionGetString(POSITION_SYMBOL);
       const bool buy=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
       const ENUM_ORDER_TYPE side=buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
@@ -931,7 +961,6 @@ void ReconcileDeal(const ulong deal)
       const double vol=PositionGetDouble(POSITION_VOLUME);
       const double tickSize=SymbolInfoDouble(s,SYMBOL_TRADE_TICK_SIZE);
       const double fill=stop+(buy ? -1.0 : 1.0)*tickSize*StopSlippageTicks;
-
       double gain=0,loss=0;
       if(tickSize<=0 || stop<=0 || take<=0 || fill<=0 ||
          !OrderCalcProfit(side,s,vol,open,fill,loss) ||
@@ -959,7 +988,6 @@ bool Submit(const Market &market,const Signal &signal,const TradePlan &plan)
       SymbolInfoDouble(market.symbol,SYMBOL_TRADE_TICK_SIZE)/SymbolInfoDouble(market.symbol,SYMBOL_POINT));
    request.type_filling=plan.filling;
    request.comment=StrategyTag(signal.strategy);
-
    if(!OrderCheck(request,check) || (check.retcode!=0 && check.retcode!=TRADE_RETCODE_DONE) ||
       check.margin_free<0 || (check.margin_level>0 && check.margin_level<MinimumMarginLevel))
    {
@@ -994,7 +1022,6 @@ bool Submit(const Market &market,const Signal &signal,const TradePlan &plan)
            result.retcode==TRADE_RETCODE_CONNECTION || result.order!=0 || result.deal!=0 ||
            (sent && (result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_DONE_PARTIAL)))
       HaltEmergency("Ambiguous order outcome; reconciling");
-
    return true;
 }
 
@@ -1015,7 +1042,6 @@ bool FlattenOwned()
       if(trade.ResultRetcode()!=TRADE_RETCODE_DONE)
          done=false;
    }
-
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
       const ulong ticket=PositionGetTicket(i);
@@ -1045,7 +1071,6 @@ void ManagePositions()
       if(ticket==0 || !OwnedPosition())
          continue;
       const string s=PositionGetString(POSITION_SYMBOL);
-
       if(TimeCurrent()-(datetime)PositionGetInteger(POSITION_TIME)>=MaximumHoldSeconds)
       {
          trade.SetTypeFillingBySymbol(s);
@@ -1054,11 +1079,9 @@ void ManagePositions()
       }
       if(!EnableBreakEven && !EnableTrailing)
          continue;
-
       MqlTick tick;
       if(!SymbolInfoTick(s,tick))
          continue;
-
       const bool buy=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
       const int direction=buy ? 1 : -1;
       const double price=buy ? tick.bid : tick.ask;
@@ -1069,7 +1092,6 @@ void ManagePositions()
       const double moved=direction*(price-open);
       if(initialRisk<=0 || moved<initialRisk)
          continue;
-
       double proposed=EnableTrailing ? price-direction*initialRisk : open;
       if(EnableBreakEven)
          proposed=buy ? MathMax(proposed,open) : MathMin(proposed,open);
@@ -1102,7 +1124,6 @@ void UpdateImpulse(Market &m,const MqlTick &latest)
       SampleQuote(m,latest);
       return;
    }
-
    MqlTick recent[];
    const int count=CopyTicks(m.symbol,recent,COPY_TICKS_INFO,(ulong)m.quoteTime+1,32);
    if(count>0 && count<32)
@@ -1148,7 +1169,6 @@ void ProcessMarket(const int index,const bool permit)
    const bool ready=activeBar>0 && RefreshFeatures(markets[index],activeBar);
    if(hadQuote)
       UpdateImpulse(markets[index],tick);
-
    markets[index].quoteTime=tick.time_msc;
    markets[index].lastBid=tick.bid;
    markets[index].lastAsk=tick.ask;
@@ -1163,7 +1183,6 @@ void ProcessMarket(const int index,const bool permit)
    for(int i=0;i<count;i++)
       best=MathMax(best,signals[i].score);
    markets[index].score=best;
-
    if(!permit || dailyLock || emergency || !RefreshRisk() || best<MinimumSignalScore ||
       markets[index].spread>MaxSpreadToATR*markets[index].atr)
       return;
@@ -1184,12 +1203,10 @@ void ProcessMarket(const int index,const bool permit)
       else
          resistance=MathMax(resistance,signals[i].score);
    }
-
    if(support>=MinimumSignalScore && resistance>=MinimumSignalScore &&
       MathAbs(support-resistance)<10.0)
       return;
    const int direction=support>resistance ? 1 : -1;
-
    for(int rank=0;rank<count;rank++)
    {
       int chosen=-1;
@@ -1199,7 +1216,6 @@ void ProcessMarket(const int index,const bool permit)
             chosen=i;
       if(chosen<0)
          return;
-
       TradePlan plan;
       if(PositionSlot(s,signals[chosen].strategy,direction) &&
          MakePlan(markets[index],tick,signals[chosen],plan))
@@ -1214,6 +1230,7 @@ void ProcessMarket(const int index,const bool permit)
    }
 }
 
+
 void Button(const string name,const string text,const int row,const int x,const int width)
 {
    const string key="QTE_"+name;
@@ -1221,7 +1238,6 @@ void Button(const string name,const string text,const int row,const int x,const 
       return;
    if(!ObjectCreate(0,key,OBJ_BUTTON,0,0,0))
       return;
-
    ObjectSetInteger(0,key,OBJPROP_CORNER,CORNER_LEFT_UPPER);
    ObjectSetInteger(0,key,OBJPROP_XDISTANCE,x);
    ObjectSetInteger(0,key,OBJPROP_YDISTANCE,180+row*25);
@@ -1248,7 +1264,6 @@ void DrawPanel(const bool force)
    if(!force && now-lastPanel<350)
       return;
    lastPanel=now;
-
    Button("START","START",0,10,62);
    Button("PAUSE","PAUSE",0,76,62);
    Button("STOP","STOP",0,142,54);
@@ -1262,7 +1277,6 @@ void DrawPanel(const bool force)
    ArrayCopy(sorted,latencyBuffer,0,0,latencyCount);
    if(latencyCount>0)
       ArraySort(sorted);
-
    string message="QUANTUM TRADING ENGINE  |  "+(tester ? "TESTER" : "DEMO")+"  |  "+statusText+
                   "\nMode "+EnumToString(activeMode)+"  |  "+AccountInfoString(ACCOUNT_CURRENCY)+
                   "\nBalance "+DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2)+
@@ -1281,7 +1295,6 @@ void DrawPanel(const bool force)
                   DoubleToString(Percentile(sorted,0.5),2)+" / "+
                   DoubleToString(Percentile(sorted,0.95),2)+" / "+
                   DoubleToString(Percentile(sorted,0.99),2);
-
    for(int i=0;i<MathMin(ArraySize(markets),3);i++)
       message+="\n"+markets[i].symbol+"  "+markets[i].regime+
                "  strength "+DoubleToString(markets[i].regimeScore,0)+
@@ -1313,12 +1326,12 @@ void HandleButton(const string key)
    ChartRedraw();
 }
 
+
 int OnInit()
 {
    tester=(bool)MQLInfoInteger(MQL_TESTER);
    if(!AllowedAccount() || !InputsValid())
       return INIT_PARAMETERS_INCORRECT;
-
    activeMode=RiskMode;
    trade.SetExpertMagicNumber(Magic);
    trade.SetAsyncMode(false);
@@ -1326,7 +1339,6 @@ int OnInit()
       return INIT_FAILED;
    if(!EventSetMillisecondTimer(PollMilliseconds))
       return INIT_FAILED;
-
    if(WriteExecutionLog)
    {
       const string filename="QTE_"+(string)AccountInfoInteger(ACCOUNT_LOGIN)+"_"+
@@ -1336,7 +1348,6 @@ int OnInit()
          FileWrite(ledger,"server_time","symbol","action","strategy","retcode","order",
                    "deal","price","lots","estimated_risk","estimated_reward","elapsed_us");
    }
-
    running=StartOnLoad;
    if(EnableAI)
       Print("QTE: AI input enabled, calibrated runtime model unavailable; rule strategies only.");
@@ -1372,7 +1383,6 @@ void Pump(const bool chartTick)
       if(FlattenOwned())
          finishFlatten=false;
    }
-
    if(ready && !dailyLock && !emergency && !finishFlatten && CanSend())
       ManagePositions();
 
@@ -1385,16 +1395,8 @@ void Pump(const bool chartTick)
    DrawPanel(false);
 }
 
-void OnTick()
-{
-   Pump(true);
-}
-
-void OnTimer()
-{
-   Pump(false);
-}
-
+void OnTick() { Pump(true); }
+void OnTimer() { Pump(false); }
 void OnTradeTransaction(const MqlTradeTransaction &transaction,const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
@@ -1412,9 +1414,11 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
       HandleButton(sparam);
 }
 
+// The terminal's standard tester report remains the authoritative account curve.
 double OnTester()
 {
-   PrintFormat("QTE TESTER | trades %.0f | net %.2f | gross profit %.2f | gross loss %.2f | equity DD %.2f%% | profit factor %.4f",
+   PrintFormat("QTE TESTER | trades %.0f | net %.2f | gross profit %.2f | gross loss %.2f | "
+               "equity DD %.2f%% | profit factor %.4f",
                TesterStatistics(STAT_TRADES),TesterStatistics(STAT_PROFIT),
                TesterStatistics(STAT_GROSS_PROFIT),TesterStatistics(STAT_GROSS_LOSS),
                TesterStatistics(STAT_EQUITY_DDREL_PERCENT),TesterStatistics(STAT_PROFIT_FACTOR));
