@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                  Vulcares_Vx.mq5 |
 //|           Pyramiding / Trend-Following Layering Momentum EA       |
-//|     Upward Layering BUY | Downward Layering SELL | Fast Trailing  |
+//|     Min $10 (USD/USC) Stop Loss Floor + Trend Layering + Trail   |
 //+------------------------------------------------------------------+
 #property copyright "Vulcares Quantitative Engineering"
-#property version   "1.30"
+#property version   "1.50"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -16,6 +16,13 @@ enum ENUM_EXECUTION_MODE
 {
    MODE_TREND_LAYERING      = 0, // Trend Pyramiding Layering (Up=BUY, Down=SELL)
    MODE_STRICT_SINGLE_ENTRY = 1  // Single Entry Only
+};
+
+enum ENUM_SL_MODE
+{
+   SL_PERCENT_OF_PRICE   = 0, // 1.0% Price Distance (Enforced Min $10 USD/USC Floor)
+   SL_PERCENT_OF_BALANCE = 1, // 1.0% Balance Risk (Enforced Min $10 USD/USC Floor)
+   SL_FIXED_MONEY_ONLY   = 2  // Strict Fixed Money SL ($10 USD/USC per Position)
 };
 
 enum ENUM_TRAILING_MODE
@@ -80,10 +87,13 @@ input bool                InpEnableTrendLayering  = true;                      /
 input int                 InpMaxLayers            = 5;                         // Max Simultaneous Layers Per Direction
 input int                 InpLayerStepPoints      = 250;                       // Min Favorable Distance to Add Layer (points)
 input double              InpLayerLotMultiplier   = 1.0;                       // Layer Lot Multiplier (1.0 = Fixed 0.01 per layer)
-input bool                InpRequireProfitForLayer= true;                      // Require Previous Layer in Profit/Protected
+input bool                InpRequireProfitForLayer= true;                      // Require Previous Layer in Profit
 
-input group "=== 4. ULTRA-RESPONSIVE TRAILING STOP & PROTECTION ==="
-input int                 InpInitialSLPoints      = 10810;                     // Restored Initial Protective SL (10810 points)
+input group "=== 4. STOP LOSS (MIN $10 USD/USC) & TRAILING STOP ==="
+input ENUM_SL_MODE        InpStopLossMode         = SL_PERCENT_OF_PRICE;       // Stop Loss Mode
+input double              InpStopLossPercent      = 1.0;                       // Stop Loss Percentage (1.0%)
+input double              InpMinStopLossMoney     = 10.0;                      // Minimum Stop Loss Floor ($10.00 USD/USC)
+input int                 InpFallbackSLPoints     = 1000;                      // Fallback SL Points (1000 pts = $10 @ 0.01 lot)
 input bool                InpEnableBreakEven      = true;                      // Enable Break-Even Stage
 input int                 InpBreakEvenTriggerPts  = 350;                       // Break-Even Trigger (points)
 input int                 InpBreakEvenOffsetPts   = 50;                        // Break-Even Lock Offset (points)
@@ -164,7 +174,7 @@ string             g_momentum_dir     = "NEUTRAL";
 TickSample         g_ticks[MAX_TICK_BUFFER];
 int                g_tick_count = 0;
 
-// Tracked positions (up to 20 layers)
+// Tracked positions
 PositionTracker    g_tracked[20];
 int                g_tracked_count = 0;
 
@@ -207,7 +217,7 @@ int OnInit()
    if(g_state != STATE_RISK_LOCK)
       g_state = STATE_SCANNING;
 
-   Print("[Vulcares Vx] Initialized v1.30 Trend Layering | BaseLot: ", InpBaseLot, " | InitialSL: ", InpInitialSLPoints, " pts");
+   Print("[Vulcares Vx] Initialized v1.50 | Min SL Floor: ", InpMinStopLossMoney, " ", AccountInfoString(ACCOUNT_CURRENCY));
    return(INIT_SUCCEEDED);
 }
 
@@ -277,7 +287,6 @@ void OnTick()
 
    ReconcilePositions();
 
-   // 1. Always manage Trailing Stop on all open positions first
    if(g_tracked_count > 0)
       ManageOpenPositions(tick);
 
@@ -290,7 +299,6 @@ void OnTick()
    if(g_last_entry_time_msc > 0 && (tick.time_msc - g_last_entry_time_msc) < InpReentryDelayMs)
       return;
 
-   // 2. Evaluate Primary Entry OR Trend-Following Layering
    EvaluateEntryAndLayering(tick);
 
    if(InpShowDashboard && MQLInfoInteger(MQL_VISUAL_MODE))
@@ -298,8 +306,63 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
+//| Convert Currency Amount ($10 USD/USC) to Points for Given Lot    |
+//+------------------------------------------------------------------+
+int MoneyToPoints(double money_amount, double lot)
+{
+   double point    = ExtSym.Point();
+   double tick_val = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tick_sz  = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   if(point > 0.0 && tick_val > 0.0 && tick_sz > 0.0 && lot > 0.0)
+   {
+      double pt_val_per_lot = tick_val * (point / tick_sz);
+      double cost_per_point = pt_val_per_lot * lot;
+      if(cost_per_point > 0.0)
+         return (int)MathCeil(money_amount / cost_per_point);
+   }
+   return InpFallbackSLPoints;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Dynamic Stop Loss with Strict Min $10 (USD/USC) Floor  |
+//+------------------------------------------------------------------+
+int ComputeDynamicSLPoints(double reference_price, double lot)
+{
+   double point = ExtSym.Point();
+   if(point <= 0.0) return InpFallbackSLPoints;
+
+   long stops_level   = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   int min_broker_pts = (int)(stops_level + 25);
+
+   // Strict $10.00 (USD or USC) minimum stop loss floor in points
+   int min_money_sl_pts = (InpMinStopLossMoney > 0.0) ? MoneyToPoints(InpMinStopLossMoney, lot) : 0;
+
+   int mode_sl_pts = min_money_sl_pts;
+
+   if(InpStopLossMode == SL_PERCENT_OF_PRICE)
+   {
+      double sl_price_dist = reference_price * (InpStopLossPercent / 100.0);
+      mode_sl_pts = (int)MathRound(sl_price_dist / point);
+   }
+   else if(InpStopLossMode == SL_PERCENT_OF_BALANCE)
+   {
+      double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
+      double risk_money = balance * (InpStopLossPercent / 100.0);
+      mode_sl_pts = MoneyToPoints(risk_money, lot);
+   }
+   else if(InpStopLossMode == SL_FIXED_MONEY_ONLY)
+   {
+      mode_sl_pts = min_money_sl_pts;
+   }
+
+   // Enforce that SL distance is NEVER smaller than $10 (USD/USC) equivalent or broker stops_level
+   int final_sl_pts = MathMax(mode_sl_pts, min_money_sl_pts);
+   return MathMax(min_broker_pts, final_sl_pts);
+}
+
+//+------------------------------------------------------------------+
 //| Evaluate Initial Entry & Trend-Following Pyramiding Layering     |
-//| Rule: Rising Momentum -> Open BUY layers; Falling -> Open SELL   |
 //+------------------------------------------------------------------+
 void EvaluateEntryAndLayering(const MqlTick &tick)
 {
@@ -309,7 +372,6 @@ void EvaluateEntryAndLayering(const MqlTick &tick)
       return;
 
    long stops_level = SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   int effective_sl_pts = (InpInitialSLPoints > 0) ? (int)MathMax((double)InpInitialSLPoints, (double)(stops_level + 20)) : 0;
 
    int buy_layers = 0, sell_layers = 0;
    double highest_buy_entry = -DBL_MAX;
@@ -348,10 +410,10 @@ void EvaluateEntryAndLayering(const MqlTick &tick)
       {
          if(buy_layers == 0)
          {
-            // First BUY entry
-            double lot = CalculateLayerLot(0);
-            double sl  = (effective_sl_pts > 0) ? NormalizePrice(tick.ask - effective_sl_pts * point) : 0.0;
-            double tp  = (InpEnableFixedTP && InpFixedTPPoints > 0) ? NormalizePrice(tick.ask + InpFixedTPPoints * point) : 0.0;
+            double lot    = CalculateLayerLot(0);
+            int sl_pts    = ComputeDynamicSLPoints(tick.ask, lot);
+            double sl     = (sl_pts > 0) ? NormalizePrice(tick.ask - sl_pts * point) : 0.0;
+            double tp     = (InpEnableFixedTP && InpFixedTPPoints > 0) ? NormalizePrice(tick.ask + InpFixedTPPoints * point) : 0.0;
 
             if(ExecuteMarketOrder(ORDER_TYPE_BUY, lot, tick.ask, sl, tp, "VulcaresVx_BUY_L1"))
             {
@@ -361,15 +423,14 @@ void EvaluateEntryAndLayering(const MqlTick &tick)
          }
          else if(allow_layering)
          {
-            // Add BUY layer ONLY when price moves UP above highest BUY entry by InpLayerStepPoints
             double step_dist_pts = (tick.ask - highest_buy_entry) / point;
             bool profit_ok = (!InpRequireProfitForLayer) || (tick.bid > highest_buy_entry);
 
             if(step_dist_pts >= InpLayerStepPoints && profit_ok)
             {
-               double lot = CalculateLayerLot(buy_layers);
-               double sl  = (effective_sl_pts > 0) ? NormalizePrice(tick.ask - effective_sl_pts * point) : 0.0;
-               // Inherit tighter trailing SL if earlier layer already locked profit
+               double lot    = CalculateLayerLot(buy_layers);
+               int sl_pts    = ComputeDynamicSLPoints(tick.ask, lot);
+               double sl     = (sl_pts > 0) ? NormalizePrice(tick.ask - sl_pts * point) : 0.0;
                if(lowest_buy_sl < DBL_MAX && lowest_buy_sl > sl && (tick.bid - lowest_buy_sl) >= (stops_level + 15) * point)
                   sl = lowest_buy_sl;
 
@@ -392,10 +453,10 @@ void EvaluateEntryAndLayering(const MqlTick &tick)
       {
          if(sell_layers == 0)
          {
-            // First SELL entry
-            double lot = CalculateLayerLot(0);
-            double sl  = (effective_sl_pts > 0) ? NormalizePrice(tick.bid + effective_sl_pts * point) : 0.0;
-            double tp  = (InpEnableFixedTP && InpFixedTPPoints > 0) ? NormalizePrice(tick.bid - InpFixedTPPoints * point) : 0.0;
+            double lot    = CalculateLayerLot(0);
+            int sl_pts    = ComputeDynamicSLPoints(tick.bid, lot);
+            double sl     = (sl_pts > 0) ? NormalizePrice(tick.bid + sl_pts * point) : 0.0;
+            double tp     = (InpEnableFixedTP && InpFixedTPPoints > 0) ? NormalizePrice(tick.bid - InpFixedTPPoints * point) : 0.0;
 
             if(ExecuteMarketOrder(ORDER_TYPE_SELL, lot, tick.bid, sl, tp, "VulcaresVx_SELL_L1"))
             {
@@ -405,15 +466,14 @@ void EvaluateEntryAndLayering(const MqlTick &tick)
          }
          else if(allow_layering)
          {
-            // Add SELL layer ONLY when price drops BELOW lowest SELL entry by InpLayerStepPoints
             double step_dist_pts = (lowest_sell_entry - tick.bid) / point;
             bool profit_ok = (!InpRequireProfitForLayer) || (tick.ask < lowest_sell_entry);
 
             if(step_dist_pts >= InpLayerStepPoints && profit_ok)
             {
-               double lot = CalculateLayerLot(sell_layers);
-               double sl  = (effective_sl_pts > 0) ? NormalizePrice(tick.bid + effective_sl_pts * point) : 0.0;
-               // Inherit tighter trailing SL if earlier layer already locked profit
+               double lot    = CalculateLayerLot(sell_layers);
+               int sl_pts    = ComputeDynamicSLPoints(tick.bid, lot);
+               double sl     = (sl_pts > 0) ? NormalizePrice(tick.bid + sl_pts * point) : 0.0;
                if(highest_sell_sl > 0.0 && highest_sell_sl < sl && (highest_sell_sl - tick.ask) >= (stops_level + 15) * point)
                   sl = highest_sell_sl;
 
@@ -978,25 +1038,23 @@ void CloseAllEA_Positions(string reason)
    }
 }
 
-//+------------------------------------------------------------------+
-//| Layer Lot Calculation (Default Fixed 0.01 per Layer)             |
-//+------------------------------------------------------------------+
 double CalculateLayerLot(int layer_index)
 {
    double base = InpBaseLot;
 
-   if(InpAutoLotMode && InpInitialSLPoints > 0 && InpRiskPercentPerTrade > 0.0)
+   if(InpAutoLotMode && InpRiskPercentPerTrade > 0.0)
    {
       double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
-      double risk_money = balance * (InpRiskPercentPerTrade / 100.0);
+      double risk_money = MathMax(InpMinStopLossMoney, balance * (InpRiskPercentPerTrade / 100.0));
       double tick_val   = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
       double tick_sz    = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
       double point      = ExtSym.Point();
+      int sl_pts        = ComputeDynamicSLPoints(ExtSym.Bid(), InpBaseLot);
 
-      if(tick_val > 0.0 && tick_sz > 0.0 && point > 0.0)
+      if(tick_val > 0.0 && tick_sz > 0.0 && point > 0.0 && sl_pts > 0)
       {
          double pt_val = tick_val * (point / tick_sz);
-         base = risk_money / (InpInitialSLPoints * pt_val);
+         base = risk_money / (sl_pts * pt_val);
       }
    }
 
@@ -1075,12 +1133,12 @@ void CreateDashboard()
    ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
 
    CreateLabel("TITLE", x + 12, y + 10, "VULCARES VX  |  TREND LAYERING", clrGold, 10, true);
-   CreateLabel("SUB",   x + 12, y + 28, "Up=BUY Layers | Down=SELL Layers + Trail", clrDarkGray, 8, false);
+   CreateLabel("SUB",   x + 12, y + 28, "Min SL $10 (USD/USC) + Layering + Trail", clrDarkGray, 8, false);
 
    string keys[] = {
       "EA Status:", "Market Regime:", "Momentum Dir:", "Tick Velocity:",
       "BUY Confidence:", "SELL Confidence:", "Active Layers:", "Total Active Lot:",
-      "Layer Step / SL:", "Floating P/L:", "Trailing Status:", "Tightest SL:",
+      "SL Floor ($10):", "Floating P/L:", "Trailing Status:", "Tightest SL:",
       "Locked Profit:", "Current Spread:", "Daily P/L:", "Actual Win Rate:"
    };
 
@@ -1147,6 +1205,7 @@ void UpdateDashboard()
       }
    }
 
+   int cur_sl_pts  = ComputeDynamicSLPoints(ExtSym.Bid(), InpBaseLot);
    double daily_pl = AccountInfoDouble(ACCOUNT_EQUITY) - g_day_start_balance;
    long spread_pts = (point > 0.0) ? (long)MathRound((ExtSym.Ask() - ExtSym.Bid()) / point) : 0;
 
@@ -1180,7 +1239,7 @@ void UpdateDashboard()
    SetVal(5, DoubleToString(g_sell_confidence, 1) + "%", (g_sell_confidence >= InpEntryConfidenceMin) ? clrTomato : clrSilver);
    SetVal(6, IntegerToString(g_tracked_count) + " / " + IntegerToString(InpMaxLayers), clrWhite);
    SetVal(7, DoubleToString(total_lot, 2) + " lot", clrWhite);
-   SetVal(8, IntegerToString(InpLayerStepPoints) + " / " + IntegerToString(InpInitialSLPoints) + " pts", clrGold);
+   SetVal(8, "Min " + DoubleToString(InpMinStopLossMoney, 0) + " " + AccountInfoString(ACCOUNT_CURRENCY) + " (" + IntegerToString(cur_sl_pts) + " pts)", clrGold);
    SetVal(9, DoubleToString(float_pl, 2) + " " + AccountInfoString(ACCOUNT_CURRENCY), (float_pl >= 0.0) ? clrLime : clrTomato);
    SetVal(10, (g_state == STATE_TRAILING_ACTIVE) ? "TRAILING LOCK" : ((g_tracked_count > 0) ? "ARMED" : "IDLE"), clrGold);
    SetVal(11, (tight_sl > 0.0) ? DoubleToString(tight_sl, digits) : "NONE", clrCrimson);
