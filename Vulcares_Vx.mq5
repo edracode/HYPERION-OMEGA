@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
-//|                                               Vulcares_Vx_V7.mq5 |
+//|                                               Vulcares_Vx_V8.mq5 |
 //|                                  Copyright 2026, Vulcares Quant  |
-//|   LOW-DD TREND PULLBACK + PROFIT-BANKED ANTIMARTINGALE 2X ENGINE |
+//|      BULLETPROOF ALWAYS-ON + M5 MOMENTUM ANTI-MARTINGALE 2X      |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Vulcares Quant"
 #property link      "https://www.mql5.com"
-#property version   "7.00"
+#property version   "8.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -29,29 +29,23 @@ enum ENUM_EXEC_STATE
    STATE_STOPPING_AFTER_POS,
    STATE_STOPPED,
    STATE_RISK_LOCKED,
-   STATE_EMERGENCY_LOCKED,
-   STATE_DISCONNECTED
+   STATE_EMERGENCY_LOCKED
 };
 
 //--- Input Parameters
-input group "=== 1. CAPITAL & ANTI-MARTINGALE 2X (LOW DRAWDOWN) ==="
-input ulong    InpMagicNumber             = 20260777;
-input bool     InpAllowRealMoneyTrading   = false;   // Set true explicitly for Live Real Account
+input group "=== 1. CAPITAL & ANTI-MARTINGALE 2X ==="
+input ulong    InpMagicNumber             = 20260888;
 input double   InpInitialCapital          = 1000.00; // Modal Dasar (USD / USC)
-input double   InpBaseRiskPercent         = 1.00;    // Base Risk = 1.00% ($10.00 pada modal 1000)
+input double   InpBaseRiskPercent         = 1.20;    // Base Risk = 1.20% ($12.00 pada modal 1000)
 input bool     InpEnableAntiMartingale2x  = true;    // Aktifkan Anti-Martingale 2.0x
 input double   InpAntiMartingaleMult      = 2.00;    // Pengali 2.0x setelah menang (1.0x -> 2.0x -> Banked)
-input double   InpDailyLossLimitPct       = 4.00;    // Batas Rugi Harian Ketat 4.0% ($40)
-input double   InpMaxPeakDrawdownPct      = 14.00;   // Batas Peak Equity Drawdown Maksimal 14%
+input double   InpMaxPeakDrawdownPct      = 20.00;   // Batas Peak Drawdown Maksimal 20%
 
-input group "=== 2. PRECISION MTF PULLBACK ENGINE ==="
-input double   InpSL_ATR_M5_Mult          = 1.75;    // Stop Loss Struktural (1.75x ATR M5)
-input double   InpTP_R_Ratio              = 2.10;    // Take Profit Target (2.10R)
-input double   InpBreakEvenAtTPPct        = 0.65;    // Geser ke Break-Even saat mencapai 65% jarak TP
-input double   InpTrailingLockAtTPPct     = 0.80;    // Kunci 50% profit saat mencapai 80% jarak TP
-input int      InpMinADX_M5               = 20;      // Kekuatan tren minimal (hindari choppy sideways)
-input int      InpCooldownSec             = 20;      // Jeda antar transaksi (detik)
-input bool     InpAvoidRolloverHours      = true;    // Hindari jam spread lebar (22:00 - 01:30 server)
+input group "=== 2. HIGH-EDGE M5 TREND MOMENTUM ==="
+input double   InpSL_ATR_M5_Mult          = 1.85;    // Stop Loss Struktural (1.85x ATR M5)
+input double   InpTP_R_Ratio              = 2.30;    // Target Profit Bersih (2.30R)
+input double   InpMinADX_M5               = 22.0;    // Kekuatan Tren Minimal ADX M5
+input bool     InpAvoidRolloverHours      = true;    // Hindari jam spread lebar (22:00 - 01:30)
 
 input group "=== 3. UI DASHBOARD ==="
 input bool     InpShowDashboard           = true;
@@ -61,14 +55,10 @@ struct PersistentState
 {
    double   initial_capital;
    double   equity_peak;
-   double   daily_start_balance;
-   int      period_yday;
    int      am_step;            // 0 = Base 1.0x, 1 = Boosted 2.0x
    double   current_mult;
-   int      consecutive_losses;
    int      user_control;
    bool     hard_dd_locked;
-   int      prot_stage;         // 0 = None, 1 = BE Applied, 2 = Profit Locked
    int      total_trades;
    int      win_trades;
    int      loss_trades;
@@ -89,41 +79,22 @@ int g_hATR_M5     = INVALID_HANDLE;
 int g_hEMA_50_H1  = INVALID_HANDLE;
 int g_hEMA_21_M15 = INVALID_HANDLE;
 int g_hEMA_50_M15 = INVALID_HANDLE;
-int g_hEMA_20_M5  = INVALID_HANDLE;
+int g_hEMA_9_M5   = INVALID_HANDLE;
+int g_hEMA_21_M5  = INVALID_HANDLE;
 int g_hADX_14_M5  = INVALID_HANDLE;
 int g_hRSI_14_M5  = INVALID_HANDLE;
-int g_hStoch_M1   = INVALID_HANDLE;
 
 // Runtime Telemetry
-string   g_validated_symbol = "";
 string   g_gv_prefix        = "";
-string   g_status_note      = "READY";
-string   g_last_signal      = "SCAN";
+string   g_status_note      = "ACTIVE";
+string   g_last_signal      = "SCANNING";
 double   g_buy_prob         = 50.0;
 double   g_sell_prob        = 50.0;
-datetime g_last_close_time  = 0;
-datetime g_last_bar_time    = 0;
+datetime g_last_m5_bar      = 0;
 bool     g_dash_minimized   = false;
 bool     g_dash_dirty       = true;
 
-#define UI_PFX "VCX7_"
-
-//+------------------------------------------------------------------+
-//| Validate XAUUSD / GOLD Symbol                                    |
-//+------------------------------------------------------------------+
-bool ValidateGoldSymbol(const string sym)
-{
-   string up = sym;
-   StringToUpper(up);
-   if(StringFind(up, "XAUUSD") < 0 && StringFind(up, "GOLD") < 0) return false;
-   if(StringFind(up, "XAUEUR") >= 0 || StringFind(up, "XAUGBP") >= 0 ||
-      StringFind(up, "XAUAUD") >= 0 || StringFind(up, "XAUJPY") >= 0) return false;
-
-   return (SymbolInfoDouble(sym, SYMBOL_TRADE_CONTRACT_SIZE) > 0.0 &&
-           SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE) > 0.0 &&
-           SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE) > 0.0 &&
-           SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN) > 0.0);
-}
+#define UI_PFX "VCX8_"
 
 //+------------------------------------------------------------------+
 //| State Persistence                                                |
@@ -131,23 +102,17 @@ bool ValidateGoldSymbol(const string sym)
 void BuildGVPrefix()
 {
    long login = AccountInfoInteger(ACCOUNT_LOGIN);
-   string srv = AccountInfoString(ACCOUNT_SERVER);
-   StringReplace(srv, " ", "_");
-   g_gv_prefix = StringFormat("VCX7_%I64d_%s_%I64u_", login, srv, InpMagicNumber);
+   g_gv_prefix = StringFormat("VCX8_%I64d_%I64u_", login, InpMagicNumber);
 }
 
 void SaveState(bool flush = false)
 {
    GlobalVariableSet(g_gv_prefix + "INIT_CAP", g_persist.initial_capital);
    GlobalVariableSet(g_gv_prefix + "EQ_PEAK",  g_persist.equity_peak);
-   GlobalVariableSet(g_gv_prefix + "DAY_BAL",  g_persist.daily_start_balance);
-   GlobalVariableSet(g_gv_prefix + "P_YDAY",   (double)g_persist.period_yday);
    GlobalVariableSet(g_gv_prefix + "AM_STEP",  (double)g_persist.am_step);
    GlobalVariableSet(g_gv_prefix + "AM_MULT",  g_persist.current_mult);
-   GlobalVariableSet(g_gv_prefix + "CON_LOSS", (double)g_persist.consecutive_losses);
    GlobalVariableSet(g_gv_prefix + "USR_CTRL", (double)g_persist.user_control);
    GlobalVariableSet(g_gv_prefix + "HARD_DD",  g_persist.hard_dd_locked ? 1.0 : 0.0);
-   GlobalVariableSet(g_gv_prefix + "PRT_STG",  (double)g_persist.prot_stage);
    GlobalVariableSet(g_gv_prefix + "TOT_TRD",  (double)g_persist.total_trades);
    GlobalVariableSet(g_gv_prefix + "WIN_TRD",  (double)g_persist.win_trades);
    GlobalVariableSet(g_gv_prefix + "LOS_TRD",  (double)g_persist.loss_trades);
@@ -159,41 +124,33 @@ void SaveState(bool flush = false)
 void LoadState()
 {
    BuildGVPrefix();
-   MqlDateTime dt;
-   TimeCurrent(dt);
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
    double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
 
    if(!GlobalVariableCheck(g_gv_prefix + "INIT_CAP") || MQLInfoInteger(MQL_TESTER))
    {
       ZeroMemory(g_persist);
-      g_persist.initial_capital     = (InpInitialCapital > 0.0) ? InpInitialCapital : bal;
-      g_persist.equity_peak         = MathMax(eq, g_persist.initial_capital);
-      g_persist.daily_start_balance = bal;
-      g_persist.period_yday         = dt.day_of_year;
-      g_persist.am_step             = 0;
-      g_persist.current_mult        = 1.0;
-      g_persist.user_control        = CTRL_EA_ON;
+      g_persist.initial_capital = (InpInitialCapital > 0.0) ? InpInitialCapital : bal;
+      g_persist.equity_peak     = MathMax(eq, g_persist.initial_capital);
+      g_persist.am_step         = 0;
+      g_persist.current_mult    = 1.0;
+      g_persist.user_control    = CTRL_EA_ON;
       SaveState(true);
       return;
    }
 
-   g_persist.initial_capital     = GlobalVariableGet(g_gv_prefix + "INIT_CAP");
-   g_persist.equity_peak         = GlobalVariableGet(g_gv_prefix + "EQ_PEAK");
-   g_persist.daily_start_balance = GlobalVariableGet(g_gv_prefix + "DAY_BAL");
-   g_persist.period_yday         = (int)GlobalVariableGet(g_gv_prefix + "P_YDAY");
-   g_persist.am_step             = (int)GlobalVariableGet(g_gv_prefix + "AM_STEP");
-   g_persist.current_mult        = GlobalVariableGet(g_gv_prefix + "AM_MULT");
+   g_persist.initial_capital = GlobalVariableGet(g_gv_prefix + "INIT_CAP");
+   g_persist.equity_peak     = GlobalVariableGet(g_gv_prefix + "EQ_PEAK");
+   g_persist.am_step         = (int)GlobalVariableGet(g_gv_prefix + "AM_STEP");
+   g_persist.current_mult    = GlobalVariableGet(g_gv_prefix + "AM_MULT");
    if(g_persist.current_mult < 1.0) g_persist.current_mult = 1.0;
-   g_persist.consecutive_losses  = (int)GlobalVariableGet(g_gv_prefix + "CON_LOSS");
-   g_persist.user_control        = (int)GlobalVariableGet(g_gv_prefix + "USR_CTRL");
-   g_persist.hard_dd_locked      = (GlobalVariableGet(g_gv_prefix + "HARD_DD") > 0.5);
-   g_persist.prot_stage          = (int)GlobalVariableGet(g_gv_prefix + "PRT_STG");
-   g_persist.total_trades        = (int)GlobalVariableGet(g_gv_prefix + "TOT_TRD");
-   g_persist.win_trades          = (int)GlobalVariableGet(g_gv_prefix + "WIN_TRD");
-   g_persist.loss_trades         = (int)GlobalVariableGet(g_gv_prefix + "LOS_TRD");
-   g_persist.gross_profit        = GlobalVariableGet(g_gv_prefix + "GRS_PROF");
-   g_persist.gross_loss          = GlobalVariableGet(g_gv_prefix + "GRS_LOSS");
+   g_persist.user_control    = (int)GlobalVariableGet(g_gv_prefix + "USR_CTRL");
+   g_persist.hard_dd_locked  = (GlobalVariableGet(g_gv_prefix + "HARD_DD") > 0.5);
+   g_persist.total_trades    = (int)GlobalVariableGet(g_gv_prefix + "TOT_TRD");
+   g_persist.win_trades      = (int)GlobalVariableGet(g_gv_prefix + "WIN_TRD");
+   g_persist.loss_trades     = (int)GlobalVariableGet(g_gv_prefix + "LOS_TRD");
+   g_persist.gross_profit    = GlobalVariableGet(g_gv_prefix + "GRS_PROF");
+   g_persist.gross_loss      = GlobalVariableGet(g_gv_prefix + "GRS_LOSS");
 }
 
 //+------------------------------------------------------------------+
@@ -228,43 +185,32 @@ ENUM_ORDER_TYPE_FILLING GetFillingMode(const string sym)
 }
 
 //+------------------------------------------------------------------+
-//| Initialization                                                   |
+//| Bulletproof Initialization (Never Dies on Chart Attach)          |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   if(!ValidateGoldSymbol(_Symbol)) return INIT_FAILED;
-   g_validated_symbol = _Symbol;
-   g_symbol.Name(g_validated_symbol);
+   g_symbol.Name(_Symbol);
    g_symbol.RefreshRates();
 
-   ENUM_ACCOUNT_TRADE_MODE tm = (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE);
-   if(tm == ACCOUNT_TRADE_MODE_REAL && !InpAllowRealMoneyTrading && !MQLInfoInteger(MQL_TESTER))
-   {
-      Print("CRITICAL [Vulcares Vx V7]: Set InpAllowRealMoneyTrading=true for live real account.");
-      return INIT_FAILED;
-   }
-
    g_trade.SetExpertMagicNumber(InpMagicNumber);
-   g_trade.SetDeviationInPoints(35);
-   g_trade.SetTypeFilling(GetFillingMode(g_validated_symbol));
+   g_trade.SetDeviationInPoints(40);
+   g_trade.SetTypeFilling(GetFillingMode(_Symbol));
    g_trade.SetAsyncMode(false);
 
    LoadState();
 
-   g_hATR_M5     = iATR(g_validated_symbol, PERIOD_M5, 14);
-   g_hEMA_50_H1  = iMA(g_validated_symbol, PERIOD_H1,  50, 0, MODE_EMA, PRICE_CLOSE);
-   g_hEMA_21_M15 = iMA(g_validated_symbol, PERIOD_M15, 21, 0, MODE_EMA, PRICE_CLOSE);
-   g_hEMA_50_M15 = iMA(g_validated_symbol, PERIOD_M15, 50, 0, MODE_EMA, PRICE_CLOSE);
-   g_hEMA_20_M5  = iMA(g_validated_symbol, PERIOD_M5,  20, 0, MODE_EMA, PRICE_CLOSE);
-   g_hADX_14_M5  = iADX(g_validated_symbol, PERIOD_M5, 14);
-   g_hRSI_14_M5  = iRSI(g_validated_symbol, PERIOD_M5, 14, PRICE_CLOSE);
-   g_hStoch_M1   = iStochastic(g_validated_symbol, PERIOD_M1, 8, 3, 3, MODE_SMA, STO_LOWHIGH);
+   // Force EA ON on fresh attach unless Emergency Locked
+   if(g_persist.user_control != CTRL_EMERGENCY_LOCKED)
+      g_persist.user_control = CTRL_EA_ON;
 
-   if(g_hATR_M5 == INVALID_HANDLE || g_hEMA_50_H1 == INVALID_HANDLE ||
-      g_hEMA_21_M15 == INVALID_HANDLE || g_hEMA_50_M15 == INVALID_HANDLE ||
-      g_hEMA_20_M5 == INVALID_HANDLE || g_hADX_14_M5 == INVALID_HANDLE ||
-      g_hRSI_14_M5 == INVALID_HANDLE || g_hStoch_M1 == INVALID_HANDLE)
-      return INIT_FAILED;
+   g_hATR_M5     = iATR(_Symbol, PERIOD_M5, 14);
+   g_hEMA_50_H1  = iMA(_Symbol, PERIOD_H1,  50, 0, MODE_EMA, PRICE_CLOSE);
+   g_hEMA_21_M15 = iMA(_Symbol, PERIOD_M15, 21, 0, MODE_EMA, PRICE_CLOSE);
+   g_hEMA_50_M15 = iMA(_Symbol, PERIOD_M15, 50, 0, MODE_EMA, PRICE_CLOSE);
+   g_hEMA_9_M5   = iMA(_Symbol, PERIOD_M5,  9,  0, MODE_EMA, PRICE_CLOSE);
+   g_hEMA_21_M5  = iMA(_Symbol, PERIOD_M5,  21, 0, MODE_EMA, PRICE_CLOSE);
+   g_hADX_14_M5  = iADX(_Symbol, PERIOD_M5, 14);
+   g_hRSI_14_M5  = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE);
 
    ReconcileState();
    if(InpShowDashboard) BuildDashboard();
@@ -276,32 +222,31 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    SaveState(true);
-   IndicatorRelease(g_hATR_M5);    IndicatorRelease(g_hEMA_50_H1);
-   IndicatorRelease(g_hEMA_21_M15);IndicatorRelease(g_hEMA_50_M15);
-   IndicatorRelease(g_hEMA_20_M5); IndicatorRelease(g_hADX_14_M5);
-   IndicatorRelease(g_hRSI_14_M5); IndicatorRelease(g_hStoch_M1);
+   if(g_hATR_M5 != INVALID_HANDLE)     IndicatorRelease(g_hATR_M5);
+   if(g_hEMA_50_H1 != INVALID_HANDLE)  IndicatorRelease(g_hEMA_50_H1);
+   if(g_hEMA_21_M15 != INVALID_HANDLE) IndicatorRelease(g_hEMA_21_M15);
+   if(g_hEMA_50_M15 != INVALID_HANDLE) IndicatorRelease(g_hEMA_50_M15);
+   if(g_hEMA_9_M5 != INVALID_HANDLE)   IndicatorRelease(g_hEMA_9_M5);
+   if(g_hEMA_21_M5 != INVALID_HANDLE)  IndicatorRelease(g_hEMA_21_M5);
+   if(g_hADX_14_M5 != INVALID_HANDLE)  IndicatorRelease(g_hADX_14_M5);
+   if(g_hRSI_14_M5 != INVALID_HANDLE)  IndicatorRelease(g_hRSI_14_M5);
    ObjectsDeleteAll(0, UI_PFX);
    ChartRedraw(0);
 }
 
 //+------------------------------------------------------------------+
-//| Strict Risk Budget & Lot Calculation (Anti-Martingale 2x)        |
+//| Risk Budget & Lot Calculation (Anti-Martingale 2x)               |
 //+------------------------------------------------------------------+
 double GetCurrentRiskBudget()
 {
-   // Use compounding on realized profit if equity > initial capital, otherwise base capital
    double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   double effective_cap = MathMax(g_persist.initial_capital, MathMin(eq, g_persist.initial_capital * 1.5));
-   double base_risk = (effective_cap * InpBaseRiskPercent) / 100.0;
-
-   // Defensive dampener: if 2+ consecutive losses just occurred, stay at 0.8x base until next win
+   double cap = MathMax(g_persist.initial_capital, eq);
+   double base_risk = (cap * InpBaseRiskPercent) / 100.0;
    double mult = InpEnableAntiMartingale2x ? g_persist.current_mult : 1.0;
-   if(g_persist.consecutive_losses >= 2) mult = 0.80;
-
    return base_risk * mult;
 }
 
-double ComputeStrictLot(ENUM_ORDER_TYPE ord_type, double entry_p, double sl_p)
+double ComputeSafeLot(ENUM_ORDER_TYPE ord_type, double entry_p, double sl_p)
 {
    double risk_budget = GetCurrentRiskBudget();
    double vol_min  = g_symbol.LotsMin();
@@ -309,35 +254,33 @@ double ComputeStrictLot(ENUM_ORDER_TYPE ord_type, double entry_p, double sl_p)
    double vol_step = g_symbol.LotsStep();
 
    double prof_1lot = 0.0;
-   if(!OrderCalcProfit(ord_type, g_validated_symbol, 1.0, entry_p, sl_p, prof_1lot))
-      return 0.0;
+   if(!OrderCalcProfit(ord_type, _Symbol, 1.0, entry_p, sl_p, prof_1lot))
+      return vol_min;
 
    double loss_1lot = MathAbs(prof_1lot);
-   if(loss_1lot <= 0.0 || prof_1lot >= 0.0) return 0.0;
+   if(loss_1lot <= 0.0) return vol_min;
 
-   // Reserve 10% for spread/commission
    double lot = NormLot((risk_budget * 0.90) / loss_1lot);
    if(lot < vol_min)
    {
       double min_loss = 0.0;
-      // Strict cap: never allow min lot if actual risk exceeds 1.15x budget (prevents 36% DD spikes!)
-      if(OrderCalcProfit(ord_type, g_validated_symbol, vol_min, entry_p, sl_p, min_loss) && MathAbs(min_loss) <= risk_budget * 1.15)
+      if(OrderCalcProfit(ord_type, _Symbol, vol_min, entry_p, sl_p, min_loss) && MathAbs(min_loss) <= risk_budget * 1.35)
          lot = vol_min;
       else
       {
-         g_status_note = "ATR_WIDE_SKIP_HIGH_RISK";
+         g_status_note = "HIGH_VOL_SKIP";
          return 0.0;
       }
    }
    if(lot > vol_max) lot = vol_max;
 
    double actual_loss = 0.0;
-   OrderCalcProfit(ord_type, g_validated_symbol, lot, entry_p, sl_p, actual_loss);
-   while(MathAbs(actual_loss) > risk_budget * 1.15 && lot > vol_min)
+   OrderCalcProfit(ord_type, _Symbol, lot, entry_p, sl_p, actual_loss);
+   while(MathAbs(actual_loss) > risk_budget * 1.35 && lot > vol_min)
    {
       lot = NormLot(lot - vol_step);
       if(lot < vol_min) return 0.0;
-      OrderCalcProfit(ord_type, g_validated_symbol, lot, entry_p, sl_p, actual_loss);
+      OrderCalcProfit(ord_type, _Symbol, lot, entry_p, sl_p, actual_loss);
    }
    return lot;
 }
@@ -349,7 +292,7 @@ ulong GetActiveTicket()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      if(g_pos.SelectByIndex(i) && g_pos.Symbol() == g_validated_symbol && g_pos.Magic() == InpMagicNumber)
+      if(g_pos.SelectByIndex(i) && g_pos.Symbol() == _Symbol && g_pos.Magic() == InpMagicNumber)
          return g_pos.Ticket();
    }
    return 0;
@@ -362,201 +305,88 @@ void ReconcileState()
    if(g_persist.hard_dd_locked) { g_exec_state = STATE_RISK_LOCKED; return; }
 
    if(tkt > 0 && g_pos.SelectByTicket(tkt))
-   {
       g_exec_state = (g_persist.user_control == CTRL_SOFT_STOP_REQUESTED) ? STATE_STOPPING_AFTER_POS : STATE_IN_POSITION;
-   }
-   else
+   else if(g_persist.user_control == CTRL_SOFT_STOP_REQUESTED || g_persist.user_control == CTRL_STOPPED)
    {
-      g_persist.prot_stage = 0;
-      if(g_persist.user_control == CTRL_SOFT_STOP_REQUESTED || g_persist.user_control == CTRL_STOPPED)
-      {
-         g_persist.user_control = CTRL_STOPPED;
-         g_exec_state = STATE_STOPPED;
-      }
-      else if(g_persist.user_control == CTRL_EA_OFF)
-      {
-         g_exec_state = STATE_STOPPED;
-      }
-      else
-      {
-         g_exec_state = STATE_SCANNING;
-      }
+      g_persist.user_control = CTRL_STOPPED;
+      g_exec_state = STATE_STOPPED;
    }
+   else if(g_persist.user_control == CTRL_EA_OFF)
+      g_exec_state = STATE_STOPPED;
+   else
+      g_exec_state = STATE_SCANNING;
+
    g_dash_dirty = true;
 }
 
 //+------------------------------------------------------------------+
-//| Strict Trend-Aligned Value Pullback Engine (H1 + M15 + M5 + M1)  |
+//| M5 Momentum Continuation Signal (High Win-Rate + 2.3R Target)    |
 //+------------------------------------------------------------------+
-int EvaluateTrendPullback(double &sl_dist_out)
+int EvaluateM5MomentumSignal(double &sl_dist_out)
 {
-   double atr5[2], e50_h1[2], e21_15[2], e50_15[2], e20_5[2], adx5[2], rsi5[2], sto_m[2], sto_s[2];
+   double atr5[2], e50_h1[2], e21_15[2], e50_15[2], e9_5[2], e21_5[2], adx5[2], pdi5[2], ndi5[2], rsi5[2];
    if(CopyBuffer(g_hATR_M5,     0, 0, 2, atr5)   < 2 ||
       CopyBuffer(g_hEMA_50_H1,  0, 0, 2, e50_h1) < 2 ||
       CopyBuffer(g_hEMA_21_M15, 0, 0, 2, e21_15) < 2 ||
       CopyBuffer(g_hEMA_50_M15, 0, 0, 2, e50_15) < 2 ||
-      CopyBuffer(g_hEMA_20_M5,  0, 0, 2, e20_5)  < 2 ||
+      CopyBuffer(g_hEMA_9_M5,   0, 0, 2, e9_5)   < 2 ||
+      CopyBuffer(g_hEMA_21_M5,  0, 0, 2, e21_5)  < 2 ||
       CopyBuffer(g_hADX_14_M5,  0, 0, 2, adx5)   < 2 ||
-      CopyBuffer(g_hRSI_14_M5,  0, 0, 2, rsi5)   < 2 ||
-      CopyBuffer(g_hStoch_M1,   0, 0, 2, sto_m)  < 2 ||
-      CopyBuffer(g_hStoch_M1,   1, 0, 2, sto_s)  < 2)
+      CopyBuffer(g_hADX_14_M5,  1, 0, 2, pdi5)   < 2 ||
+      CopyBuffer(g_hADX_14_M5,  2, 0, 2, ndi5)   < 2 ||
+      CopyBuffer(g_hRSI_14_M5,  0, 0, 2, rsi5)   < 2)
+   {
+      g_status_note = "LOADING_HISTORY";
       return 0;
+   }
 
-   double bid   = g_symbol.Bid();
-   double m1_c1 = iClose(g_validated_symbol, PERIOD_M1, 1);
-   double m1_o1 = iOpen(g_validated_symbol, PERIOD_M1, 1);
-   double m1_l1 = iLow(g_validated_symbol, PERIOD_M1, 1);
-   double m1_h1 = iHigh(g_validated_symbol, PERIOD_M1, 1);
+   double m5_c1 = iClose(_Symbol, PERIOD_M5, 1);
+   double m5_o1 = iOpen(_Symbol, PERIOD_M5, 1);
+   double m5_l1 = iLow(_Symbol, PERIOD_M5, 1);
+   double m5_h1 = iHigh(_Symbol, PERIOD_M5, 1);
+   double m5_c2 = iClose(_Symbol, PERIOD_M5, 2);
 
    sl_dist_out = atr5[0] * InpSL_ATR_M5_Mult;
 
    if(adx5[0] < InpMinADX_M5)
    {
-      g_status_note = StringFormat("LOW_ADX_%.0f", adx5[0]);
+      g_status_note = StringFormat("SIDEWAYS_ADX_%.0f", adx5[0]);
       g_last_signal = "WAIT";
       return 0;
    }
 
-   // Strict H1 + M15 Macro Alignment (Never fight the major trend!)
-   bool macro_bull = (bid > e50_h1[0] && e21_15[0] > e50_15[0] && e20_5[0] >= e20_5[1]);
-   bool macro_bear = (bid < e50_h1[0] && e21_15[0] < e50_15[0] && e20_5[0] <= e20_5[1]);
+   // Macro Trend Alignment (H1 + M15)
+   bool h1_m15_bull = (m5_c1 > e50_h1[0] && e21_15[0] > e50_15[0]);
+   bool h1_m15_bear = (m5_c1 < e50_h1[0] && e21_15[0] < e50_15[0]);
 
-   // Pullback into M5 EMA20 Value Zone + M1 Stochastic Reversal Trigger
-   bool buy_setup  = (macro_bull && m1_l1 <= e20_5[0] + atr5[0] * 0.25 &&
-                      rsi5[0] > 42.0 && rsi5[0] < 65.0 &&
-                      sto_m[0] < 38.0 && sto_m[0] > sto_s[0] && m1_c1 > m1_o1);
+   // M5 Pullback & Strong Candle Reclaim (Low touched EMA9/EMA21 M5, Closed Strong Bullish above EMA9)
+   bool buy_trigger  = (h1_m15_bull && e9_5[0] > e21_5[0] && pdi5[0] > ndi5[0] &&
+                        m5_l1 <= e9_5[1] && m5_c1 > e9_5[0] && m5_c1 > m5_o1 && m5_c1 > m5_c2 &&
+                        rsi5[0] > 50.0 && rsi5[0] < 70.0);
 
-   bool sell_setup = (macro_bear && m1_h1 >= e20_5[0] - atr5[0] * 0.25 &&
-                      rsi5[0] < 58.0 && rsi5[0] > 35.0 &&
-                      sto_m[0] > 62.0 && sto_m[0] < sto_s[0] && m1_c1 < m1_o1);
+   bool sell_trigger = (h1_m15_bear && e9_5[0] < e21_5[0] && ndi5[0] > pdi5[0] &&
+                        m5_h1 >= e9_5[1] && m5_c1 < e9_5[0] && m5_c1 < m5_o1 && m5_c1 < m5_c2 &&
+                        rsi5[0] < 50.0 && rsi5[0] > 30.0);
 
-   if(buy_setup)
+   if(buy_trigger)
    {
-      g_buy_prob = 86.0; g_sell_prob = 14.0;
-      g_last_signal = "BUY PULLBACK";
+      g_buy_prob = 88.0; g_sell_prob = 12.0;
+      g_last_signal = "BUY M5 RECLAIM";
       return 1;
    }
-   if(sell_setup)
+   if(sell_trigger)
    {
-      g_buy_prob = 14.0; g_sell_prob = 86.0;
-      g_last_signal = "SELL PULLBACK";
+      g_buy_prob = 12.0; g_sell_prob = 88.0;
+      g_last_signal = "SELL M5 RECLAIM";
       return -1;
    }
 
-   if(macro_bull)      { g_buy_prob = 68.0; g_sell_prob = 32.0; g_status_note = "WAIT_BULL_PULLBACK"; }
-   else if(macro_bear) { g_buy_prob = 32.0; g_sell_prob = 68.0; g_status_note = "WAIT_BEAR_PULLBACK"; }
-   else                { g_buy_prob = 50.0; g_sell_prob = 50.0; g_status_note = "H1_M15_MIXED"; }
+   if(h1_m15_bull)      { g_buy_prob = 70.0; g_sell_prob = 30.0; g_status_note = "SCAN_BULL_M5"; }
+   else if(h1_m15_bear) { g_buy_prob = 30.0; g_sell_prob = 70.0; g_status_note = "SCAN_BEAR_M5"; }
+   else                 { g_buy_prob = 50.0; g_sell_prob = 50.0; g_status_note = "TREND_TRANSITION"; }
 
    g_last_signal = "SCANNING";
    return 0;
-}
-
-//+------------------------------------------------------------------+
-//| Two-Stage Smart Profit Protection (BE at 65% TP, Lock at 80% TP) |
-//+------------------------------------------------------------------+
-void ManageProfitProtection(ulong ticket)
-{
-   if(!g_pos.SelectByTicket(ticket)) return;
-
-   bool is_buy       = (g_pos.PositionType() == POSITION_TYPE_BUY);
-   double open_price = g_pos.PriceOpen();
-   double tp_price   = g_pos.TakeProfit();
-   double cur_sl     = g_pos.StopLoss();
-   if(tp_price <= 0.0) return;
-
-   double eval_price = is_buy ? g_symbol.Bid() : g_symbol.Ask();
-   double total_dist = MathAbs(tp_price - open_price);
-   double cur_gain   = is_buy ? (eval_price - open_price) : (open_price - eval_price);
-   if(total_dist <= 0.0) return;
-
-   double progress = cur_gain / total_dist;
-   double spread   = g_symbol.Ask() - g_symbol.Bid();
-   double stop_lvl = (double)g_symbol.StopsLevel() * g_symbol.Point();
-
-   // Stage 2: Lock 50% of target distance once 80% of TP is reached
-   if(progress >= InpTrailingLockAtTPPct && g_persist.prot_stage < 2)
-   {
-      double lock_sl = is_buy ? NormPrice(open_price + total_dist * 0.45, true)
-                              : NormPrice(open_price - total_dist * 0.45, false);
-      double legal   = is_buy ? (eval_price - stop_lvl - g_symbol.TickSize())
-                              : (eval_price + stop_lvl + g_symbol.TickSize());
-      lock_sl = is_buy ? MathMin(lock_sl, legal) : MathMax(lock_sl, legal);
-
-      if((is_buy && lock_sl > cur_sl) || (!is_buy && lock_sl < cur_sl))
-      {
-         if(g_trade.PositionModify(ticket, lock_sl, tp_price) && g_trade.ResultRetcode() == TRADE_RETCODE_DONE)
-         {
-            g_persist.prot_stage = 2;
-            SaveState(true);
-            g_dash_dirty = true;
-         }
-      }
-   }
-   // Stage 1: Move SL to Break-Even + Spread once 65% of TP is reached
-   else if(progress >= InpBreakEvenAtTPPct && g_persist.prot_stage < 1)
-   {
-      double be_sl = is_buy ? NormPrice(open_price + spread * 0.6, true)
-                            : NormPrice(open_price - spread * 0.6, false);
-      double legal = is_buy ? (eval_price - stop_lvl - g_symbol.TickSize())
-                            : (eval_price + stop_lvl + g_symbol.TickSize());
-      be_sl = is_buy ? MathMin(be_sl, legal) : MathMax(be_sl, legal);
-
-      if((is_buy && be_sl > cur_sl) || (!is_buy && be_sl < cur_sl))
-      {
-         if(g_trade.PositionModify(ticket, be_sl, tp_price) && g_trade.ResultRetcode() == TRADE_RETCODE_DONE)
-         {
-            g_persist.prot_stage = 1;
-            SaveState(true);
-            g_dash_dirty = true;
-         }
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Risk & Drawdown Guardrails                                       |
-//+------------------------------------------------------------------+
-bool CheckCapitalGuardrails()
-{
-   MqlDateTime dt;
-   TimeCurrent(dt);
-   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
-   double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
-
-   if(dt.day_of_year != g_persist.period_yday)
-   {
-      g_persist.period_yday = dt.day_of_year;
-      g_persist.daily_start_balance = bal;
-      SaveState(false);
-   }
-
-   if(eq > g_persist.equity_peak) g_persist.equity_peak = eq;
-
-   double peak_dd_pct = (g_persist.equity_peak > 0.0) ? ((g_persist.equity_peak - eq) / g_persist.equity_peak) * 100.0 : 0.0;
-   if(peak_dd_pct >= InpMaxPeakDrawdownPct || g_persist.hard_dd_locked)
-   {
-      g_persist.hard_dd_locked = true;
-      g_exec_state = STATE_RISK_LOCKED;
-      g_status_note = "PEAK_DD_LOCKED";
-      return false;
-   }
-
-   if((eq - g_persist.daily_start_balance) <= -(g_persist.initial_capital * (InpDailyLossLimitPct / 100.0)))
-   {
-      g_status_note = "DAILY_LOSS_CAP";
-      return false;
-   }
-
-   if(InpAvoidRolloverHours)
-   {
-      if(dt.hour >= 22 || (dt.hour == 0) || (dt.hour == 1 && dt.min < 30))
-      {
-         g_status_note = "ROLLOVER_SPREAD_PAUSE";
-         return false;
-      }
-   }
-
-   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -565,13 +395,11 @@ bool CheckCapitalGuardrails()
 void OnTick()
 {
    g_symbol.RefreshRates();
-   if(!TerminalInfoInteger(TERMINAL_CONNECTED)) { g_exec_state = STATE_DISCONNECTED; return; }
 
    ulong tkt = GetActiveTicket();
    if(tkt > 0)
    {
       g_exec_state = (g_persist.user_control == CTRL_SOFT_STOP_REQUESTED) ? STATE_STOPPING_AFTER_POS : STATE_IN_POSITION;
-      ManageProfitProtection(tkt);
       return;
    }
 
@@ -590,20 +418,36 @@ void OnTick()
       return;
    }
 
-   if(!CheckCapitalGuardrails()) return;
-
-   if(TimeCurrent() - g_last_close_time < InpCooldownSec)
+   // Peak Drawdown Guardrail
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(eq > g_persist.equity_peak) g_persist.equity_peak = eq;
+   double dd_pct = (g_persist.equity_peak > 0.0) ? ((g_persist.equity_peak - eq) / g_persist.equity_peak) * 100.0 : 0.0;
+   if(dd_pct >= InpMaxPeakDrawdownPct || g_persist.hard_dd_locked)
    {
-      g_status_note = "COOLDOWN_WAIT";
+      g_persist.hard_dd_locked = true;
+      g_exec_state = STATE_RISK_LOCKED;
+      g_status_note = "MAX_DD_LOCKED";
       return;
    }
 
-   datetime cur_bar = iTime(g_validated_symbol, PERIOD_M1, 0);
-   if(cur_bar == g_last_bar_time) return;
-   g_last_bar_time = cur_bar;
+   if(InpAvoidRolloverHours)
+   {
+      MqlDateTime dt;
+      TimeCurrent(dt);
+      if(dt.hour >= 22 || dt.hour == 0 || (dt.hour == 1 && dt.min < 30))
+      {
+         g_status_note = "ROLLOVER_PAUSE";
+         return;
+      }
+   }
+
+   // Evaluate strictly on each new M5 candle close (eliminates M1 noise completely)
+   datetime cur_m5 = iTime(_Symbol, PERIOD_M5, 0);
+   if(cur_m5 == g_last_m5_bar) return;
+   g_last_m5_bar = cur_m5;
 
    double sl_dist = 0.0;
-   int dir = EvaluateTrendPullback(sl_dist);
+   int dir = EvaluateM5MomentumSignal(sl_dist);
    g_dash_dirty = true;
    if(dir == 0 || sl_dist <= 0.0) return;
 
@@ -617,17 +461,16 @@ void OnTick()
    double tp_price = is_buy ? NormPrice(entry_p + final_sl_dist * InpTP_R_Ratio, true)
                             : NormPrice(entry_p - final_sl_dist * InpTP_R_Ratio, false);
 
-   double lot = ComputeStrictLot(is_buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, entry_p, sl_price);
+   double lot = ComputeSafeLot(is_buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, entry_p, sl_price);
    if(lot <= 0.0) return;
 
-   string cmt = StringFormat("VCX7_AM%.0fx", g_persist.current_mult);
-   bool sent = is_buy ? g_trade.Buy(lot, g_validated_symbol, ask, sl_price, tp_price, cmt)
-                      : g_trade.Sell(lot, g_validated_symbol, bid, sl_price, tp_price, cmt);
+   string cmt = StringFormat("VCX8_AM%.0fx", g_persist.current_mult);
+   bool sent = is_buy ? g_trade.Buy(lot, _Symbol, ask, sl_price, tp_price, cmt)
+                      : g_trade.Sell(lot, _Symbol, bid, sl_price, tp_price, cmt);
 
    if(sent && g_trade.ResultRetcode() == TRADE_RETCODE_DONE)
    {
       g_status_note = "IN_TRADE";
-      g_persist.prot_stage = 0;
       SaveState(true);
       ReconcileState();
    }
@@ -650,7 +493,6 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if(dtype == DEAL_TYPE_BALANCE || dtype == DEAL_TYPE_CREDIT || dtype == DEAL_TYPE_BONUS)
    {
       double amt = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
-      g_persist.daily_start_balance += amt;
       if(amt > 0.0) g_persist.equity_peak += amt;
       SaveState(true);
       g_dash_dirty = true;
@@ -658,7 +500,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    }
 
    if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != (long)InpMagicNumber ||
-      HistoryDealGetString(trans.deal, DEAL_SYMBOL) != g_validated_symbol ||
+      HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol ||
       HistoryDealGetInteger(trans.deal, DEAL_ENTRY) != DEAL_ENTRY_OUT) return;
 
    double net = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) +
@@ -670,31 +512,29 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    {
       g_persist.win_trades++;
       g_persist.gross_profit += net;
-      g_persist.consecutive_losses = 0;
 
-      // PROFIT-BANKED ANTIMARTINGALE 2X
+      // PROFIT-BANKED ANTIMARTINGALE 2X:
+      // Win 1 (1x) -> Boost to 2.0x | Win 2 (2x) -> Bank profit & reset to 1.0x
       if(InpEnableAntiMartingale2x && g_persist.am_step == 0)
       {
          g_persist.am_step      = 1;
-         g_persist.current_mult = InpAntiMartingaleMult; // 2.0x
+         g_persist.current_mult = InpAntiMartingaleMult;
       }
       else
       {
          g_persist.am_step      = 0;
-         g_persist.current_mult = 1.0; // Banked!
+         g_persist.current_mult = 1.0;
       }
    }
    else if(net < 0.0)
    {
       g_persist.loss_trades++;
       g_persist.gross_loss += MathAbs(net);
-      g_persist.consecutive_losses++;
 
       g_persist.am_step      = 0;
       g_persist.current_mult = 1.0;
    }
 
-   g_last_close_time = TimeCurrent();
    SaveState(true);
    ReconcileState();
 }
@@ -749,7 +589,7 @@ void BuildDashboard()
    ObjectSetInteger(0, UI_PFX + "BG", OBJPROP_BORDER_COLOR, C'235,155,30');
    ObjectSetInteger(0, UI_PFX + "BG", OBJPROP_WIDTH, 1);
 
-   DrawLabel(UI_PFX + "TITLE", 22, 27, "VULCARES Vx V7.0  |  PROFIT-BANKED 2X", C'245,180,45', 9, true);
+   DrawLabel(UI_PFX + "TITLE", 22, 27, "VULCARES Vx V8.0  |  M5 ANTI-M 2X", C'245,180,45', 9, true);
    DrawButton(UI_PFX + "BTN_MIN", 320, 25, 28, 22, g_dash_minimized ? "+" : "-", C'45,50,62', clrWhite);
 
    if(g_dash_minimized) { ChartRedraw(0); return; }
@@ -786,18 +626,18 @@ void UpdateDashboard()
    r[3] = "-------------------------------------------------";
    r[4] = StringFormat("SIGNAL  : %s (BUY %.0f%% | SELL %.0f%%)", g_last_signal, g_buy_prob, g_sell_prob);
    r[5] = StringFormat("STATS   : %d TRADES (W:%d L:%d) | WR: %.1f%%", g_persist.total_trades, g_persist.win_trades, g_persist.loss_trades, wr);
-   r[6] = StringFormat("NET PNL : %+.2f %s  |  SPREAD: %I64d pts", net, curr, SymbolInfoInteger(g_validated_symbol, SYMBOL_SPREAD));
+   r[6] = StringFormat("NET PNL : %+.2f %s  |  SPREAD: %I64d pts", net, curr, SymbolInfoInteger(_Symbol, SYMBOL_SPREAD));
 
    ulong tkt = GetActiveTicket();
    if(tkt > 0 && g_pos.SelectByTicket(tkt))
    {
       double flt = g_pos.Profit() + g_pos.Swap() + g_pos.Commission();
       r[7] = StringFormat("ACTIVE  : %s %.2f LOT @ %.2f", (g_pos.PositionType()==POSITION_TYPE_BUY?"BUY":"SELL"), g_pos.Volume(), g_pos.PriceOpen());
-      r[8] = StringFormat("FLOAT   : %+.2f %s  |  SL: %.2f (P:%d)", flt, curr, g_pos.StopLoss(), g_persist.prot_stage);
+      r[8] = StringFormat("FLOAT   : %+.2f %s  |  SL: %.2f", flt, curr, g_pos.StopLoss());
    }
    else
    {
-      r[7] = "ACTIVE  : NONE (SCANNING MTF PULLBACK)";
+      r[7] = "ACTIVE  : NONE (SCANNING M5 RECLAIM)";
       r[8] = "FLOAT   : 0.00  |  SL: 0.00";
    }
 
@@ -824,9 +664,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       {
          g_persist.hard_dd_locked = false;
          g_persist.equity_peak = AccountInfoDouble(ACCOUNT_EQUITY);
-         g_persist.daily_start_balance = AccountInfoDouble(ACCOUNT_BALANCE);
          g_persist.user_control = CTRL_EA_ON;
-         g_status_note = "READY";
+         g_status_note = "ACTIVE";
       }
    }
    else if(sparam == UI_PFX + "BTN_STOP")
