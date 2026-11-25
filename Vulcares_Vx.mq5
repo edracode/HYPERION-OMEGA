@@ -1,5 +1,5 @@
 #property strict
-#property version "1.02"
+#property version "1.03"
 #property description "Quantum Trading Engine | Strategy Tester and demo"
 
 #include <Trade/Trade.mqh>
@@ -22,6 +22,7 @@ input bool EnableCompoundRisk=true;
 input bool AllowDemoTrading=true;
 input bool AllowLiveTrading=false;
 input bool StartOnLoad=false;
+input bool AutoStartTester=true;
 input bool EnableDailyRiskLock=true;
 input bool EnableEmergencyStop=true;
 input bool EnableMartingale=false;
@@ -75,6 +76,25 @@ ulong latencyBuffer[512];
 int latencyCount=0, latencyNext=0;
 ulong lastPanel=0, nextFlatten=0;
 string statusText="Paused";
+
+enum EntryGate
+{
+   GATE_QUOTES, GATE_WARMUP, GATE_EVALUATED, GATE_NO_SIGNAL, GATE_LOW_SCORE,
+   GATE_PAUSED, GATE_FEES, GATE_PERMISSIONS, GATE_ACCOUNT_RISK,
+   GATE_SPREAD, GATE_STALE, GATE_SESSION, GATE_COOLDOWN, GATE_CONFLICT,
+   GATE_POSITION_SLOT, GATE_SYMBOL_RULES, GATE_MIN_LOT, GATE_STOP_TARGET,
+   GATE_MARGIN, GATE_CHECK_REJECT, GATE_SENT, GATE_FILLED, GATE_SEND_REJECT,
+   GATE_COUNT
+};
+
+ulong gateCounts[GATE_COUNT];
+uint lastCheckCode=0,lastSendCode=0;
+
+bool RejectGate(const EntryGate gate)
+{
+   gateCounts[gate]++;
+   return false;
+}
 
 
 struct Market
@@ -839,16 +859,16 @@ bool MakePlan(const Market &market,const MqlTick &tick,const Signal &signal,Trad
    const long mode=SymbolInfoInteger(s,SYMBOL_TRADE_MODE);
    if((mode!=SYMBOL_TRADE_MODE_FULL && mode!=(d>0 ? SYMBOL_TRADE_MODE_LONGONLY : SYMBOL_TRADE_MODE_SHORTONLY))
       || !FillPolicy(s,plan.filling))
-      return false;
+      return RejectGate(GATE_SYMBOL_RULES);
 
    const long supported=SymbolInfoInteger(s,SYMBOL_ORDER_MODE);
    if((supported & SYMBOL_ORDER_MARKET)==0 || (supported & SYMBOL_ORDER_SL)==0 ||
       (supported & SYMBOL_ORDER_TP)==0)
-      return false;
+      return RejectGate(GATE_SYMBOL_RULES);
    const double point=SymbolInfoDouble(s,SYMBOL_POINT);
    const double unit=SymbolInfoDouble(s,SYMBOL_TRADE_TICK_SIZE);
    if(point<=0 || unit<=0)
-      return false;
+      return RejectGate(GATE_SYMBOL_RULES);
 
    const double minimumDistance=unit+point*MathMax(SymbolInfoInteger(s,SYMBOL_TRADE_STOPS_LEVEL),
                                                    SymbolInfoInteger(s,SYMBOL_TRADE_FREEZE_LEVEL));
@@ -863,7 +883,7 @@ bool MakePlan(const Market &market,const MqlTick &tick,const Signal &signal,Trad
    double stopPnL=0;
    if(probe<=0 || stopFill<=0 || assumed<=0 ||
       !OrderCalcProfit(plan.side,s,probe,assumed,stopFill,stopPnL) || stopPnL>=0)
-      return false;
+      return RejectGate(GATE_STOP_TARGET);
    const double riskPerLot=-stopPnL/probe+Cost(1,true);
 
    const double equity=AccountInfoDouble(ACCOUNT_EQUITY);
@@ -874,13 +894,13 @@ bool MakePlan(const Market &market,const MqlTick &tick,const Signal &signal,Trad
    const double cap=MathMin(sizingEquity*percent*adaptive/100,
                             MathMin(remaining,ClusterBudget(s,d)));
    if(!VolumeAtRisk(s,cap,riskPerLot,plan.lots))
-      return false;
+      return RejectGate(GATE_MIN_LOT);
    double actualStopPnL=0;
    if(!OrderCalcProfit(plan.side,s,plan.lots,assumed,stopFill,actualStopPnL))
-      return false;
+      return RejectGate(GATE_STOP_TARGET);
    plan.estimatedRisk=-actualStopPnL+Cost(plan.lots,true);
    if(plan.estimatedRisk<=0 || plan.estimatedRisk>cap+1e-7)
-      return false;
+      return RejectGate(GATE_MIN_LOT);
    const double targetGross=RiskRewardRatio*plan.estimatedRisk+Cost(plan.lots,false);
 
    const double minTargetDistance=MathMax(unit,minimumDistance-d*(assumed-exitQuote));
@@ -891,7 +911,7 @@ bool MakePlan(const Market &market,const MqlTick &tick,const Signal &signal,Trad
    {
       const double trial=assumed+d*high;
       if(trial<=0 || !OrderCalcProfit(plan.side,s,plan.lots,assumed,trial,gross))
-         return false;
+         return RejectGate(GATE_STOP_TARGET);
       if(gross>=targetGross)
       {
          bracketed=true;
@@ -901,15 +921,15 @@ bool MakePlan(const Market &market,const MqlTick &tick,const Signal &signal,Trad
       if(d<0 && high>=assumed)
          high=assumed-unit;
       if(high<low)
-         return false;
+         return RejectGate(GATE_STOP_TARGET);
    }
    if(!bracketed)
-      return false;
+      return RejectGate(GATE_STOP_TARGET);
    for(int i=0;i<32 && high-low>unit*0.05;i++)
    {
       const double middle=(low+high)/2;
       if(!OrderCalcProfit(plan.side,s,plan.lots,assumed,assumed+d*middle,gross))
-         return false;
+         return RejectGate(GATE_STOP_TARGET);
       if(gross>=targetGross)
          high=middle;
       else
@@ -919,15 +939,17 @@ bool MakePlan(const Market &market,const MqlTick &tick,const Signal &signal,Trad
    plan.target=RoundPrice(s,assumed+d*high,d>0);
    if(plan.target<=0 ||
       !OrderCalcProfit(plan.side,s,plan.lots,assumed,plan.target,gross))
-      return false;
+      return RejectGate(GATE_STOP_TARGET);
    plan.estimatedReward=gross-Cost(plan.lots,false);
    if(plan.estimatedReward+1e-7<RiskRewardRatio*plan.estimatedRisk)
-      return false;
+      return RejectGate(GATE_STOP_TARGET);
 
    double margin=0;
-   return OrderCalcMargin(plan.side,s,plan.lots,assumed,margin) &&
-          margin>=0 && AccountInfoDouble(ACCOUNT_MARGIN_FREE)>=margin &&
-          equity*100>=MinimumMarginLevel*(AccountInfoDouble(ACCOUNT_MARGIN)+margin);
+   if(!OrderCalcMargin(plan.side,s,plan.lots,assumed,margin) ||
+      margin<0 || AccountInfoDouble(ACCOUNT_MARGIN_FREE)<margin ||
+      equity*100<MinimumMarginLevel*(AccountInfoDouble(ACCOUNT_MARGIN)+margin))
+      return RejectGate(GATE_MARGIN);
+   return true;
 }
 
 void LogExecution(const string s,const string action,const int strategy,const uint retcode,
@@ -994,6 +1016,8 @@ bool Submit(const Market &market,const Signal &signal,const TradePlan &plan)
    if(!OrderCheck(request,check) || (check.retcode!=0 && check.retcode!=TRADE_RETCODE_DONE) ||
       check.margin_free<0 || (check.margin_level>0 && check.margin_level<MinimumMarginLevel))
    {
+      gateCounts[GATE_CHECK_REJECT]++;
+      lastCheckCode=check.retcode;
       LogExecution(market.symbol,"CHECK_REJECT",signal.strategy,check.retcode,0,0,
                    plan.entry,plan.lots,plan.estimatedRisk,plan.estimatedReward,0);
       return true;
@@ -1001,6 +1025,8 @@ bool Submit(const Market &market,const Signal &signal,const TradePlan &plan)
 
    const ulong before=GetMicrosecondCount();
    const bool sent=OrderSend(request,result);
+   gateCounts[GATE_SENT]++;
+   lastSendCode=result.retcode;
    const ulong elapsed=GetMicrosecondCount()-before;
    latencyBuffer[latencyNext]=elapsed;
    latencyNext=(latencyNext+1)%512;
@@ -1012,6 +1038,7 @@ bool Submit(const Market &market,const Signal &signal,const TradePlan &plan)
    if(sent && (result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_DONE_PARTIAL) &&
       result.deal!=0 && result.price>0)
    {
+      gateCounts[GATE_FILLED]++;
       const double slip=signal.direction*(result.price-plan.entry);
       const double maxSlip=EntrySlippageTicks*SymbolInfoDouble(market.symbol,SYMBOL_TRADE_TICK_SIZE);
       if(slip>maxSlip+1e-9)
@@ -1021,10 +1048,14 @@ bool Submit(const Market &market,const Signal &signal,const TradePlan &plan)
       if(!exposureOK || riskToStop+dailyLoss>dayLimit+1e-7)
          HaltEmergency("Post-fill portfolio risk exceeded the estimate");
    }
-   else if(result.retcode==TRADE_RETCODE_PLACED || result.retcode==TRADE_RETCODE_TIMEOUT ||
-           result.retcode==TRADE_RETCODE_CONNECTION || result.order!=0 || result.deal!=0 ||
-           (sent && (result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_DONE_PARTIAL)))
-      HaltEmergency("Ambiguous order outcome; reconciling");
+   else
+   {
+      gateCounts[GATE_SEND_REJECT]++;
+      if(result.retcode==TRADE_RETCODE_PLACED || result.retcode==TRADE_RETCODE_TIMEOUT ||
+         result.retcode==TRADE_RETCODE_CONNECTION || result.order!=0 || result.deal!=0 ||
+         (sent && (result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_DONE_PARTIAL)))
+         HaltEmergency("Ambiguous order outcome; reconciling");
+   }
    return true;
 }
 
@@ -1152,7 +1183,7 @@ void UpdateImpulse(Market &m,const MqlTick &latest)
 
 datetime lastAttempt[];
 
-void ProcessMarket(const int index,const bool permit)
+void ProcessMarket(const int index,const bool accountReady,const bool canTrade)
 {
    MqlTick tick;
    const string s=markets[index].symbol;
@@ -1162,6 +1193,7 @@ void ProcessMarket(const int index,const bool permit)
       (tick.time_msc==markets[index].quoteTime &&
        tick.bid==markets[index].lastBid && tick.ask==markets[index].lastAsk))
       return;
+   gateCounts[GATE_QUOTES]++;
    if(ArraySize(lastAttempt)!=ArraySize(markets))
       ArrayResize(lastAttempt,ArraySize(markets));
 
@@ -1176,8 +1208,14 @@ void ProcessMarket(const int index,const bool permit)
    markets[index].lastBid=tick.bid;
    markets[index].lastAsk=tick.ask;
    markets[index].spread=tick.ask-tick.bid;
-   if(!ready || !hadQuote || (!EnableIntrabarExecution && activeBar==previousBar))
+   if(!ready || !hadQuote)
+   {
+      gateCounts[GATE_WARMUP]++;
       return;
+   }
+   if(!EnableIntrabarExecution && activeBar==previousBar)
+      return;
+   gateCounts[GATE_EVALUATED]++;
 
    Signal signals[];
    Evaluate(markets[index],(tick.bid+tick.ask)/2,previous,signals);
@@ -1186,17 +1224,60 @@ void ProcessMarket(const int index,const bool permit)
    for(int i=0;i<count;i++)
       best=MathMax(best,signals[i].score);
    markets[index].score=best;
-   if(!permit || dailyLock || emergency || !RefreshRisk() || best<MinimumSignalScore ||
-      markets[index].spread>MaxSpreadToATR*markets[index].atr)
+   if(count==0)
+   {
+      gateCounts[GATE_NO_SIGNAL]++;
       return;
+   }
+   if(best<MinimumSignalScore)
+   {
+      gateCounts[GATE_LOW_SCORE]++;
+      return;
+   }
+   if(!running || finishFlatten)
+   {
+      gateCounts[GATE_PAUSED]++;
+      return;
+   }
+   if(!ConfirmCostInputs)
+   {
+      gateCounts[GATE_FEES]++;
+      return;
+   }
+   if(!canTrade)
+   {
+      gateCounts[GATE_PERMISSIONS]++;
+      return;
+   }
+   if(!accountReady || dailyLock || emergency || !RefreshRisk())
+   {
+      gateCounts[GATE_ACCOUNT_RISK]++;
+      return;
+   }
+   if(markets[index].spread>MaxSpreadToATR*markets[index].atr)
+   {
+      gateCounts[GATE_SPREAD]++;
+      return;
+   }
    const datetime now=tester ? TimeCurrent() : TimeTradeServer();
-   if(now<tick.time || now-tick.time>MaximumQuoteAgeSeconds || !SymbolSessionOpen(s,now))
+   if(now<tick.time || now-tick.time>MaximumQuoteAgeSeconds)
+   {
+      gateCounts[GATE_STALE]++;
       return;
+   }
+   if(!SymbolSessionOpen(s,now))
+   {
+      gateCounts[GATE_SESSION]++;
+      return;
+   }
 
    const int cooldown=EnableRapidReentry ? MinimumReentrySeconds :
                       (int)MathMax(MinimumReentrySeconds,PeriodSeconds(SignalTimeframe));
    if(lastAttempt[index]!=0 && now-lastAttempt[index]<cooldown)
+   {
+      gateCounts[GATE_COOLDOWN]++;
       return;
+   }
 
    double support=0,resistance=0;
    for(int i=0;i<count;i++)
@@ -1208,7 +1289,10 @@ void ProcessMarket(const int index,const bool permit)
    }
    if(support>=MinimumSignalScore && resistance>=MinimumSignalScore &&
       MathAbs(support-resistance)<10.0)
+   {
+      gateCounts[GATE_CONFLICT]++;
       return;
+   }
    const int direction=support>resistance ? 1 : -1;
    for(int rank=0;rank<count;rank++)
    {
@@ -1220,8 +1304,9 @@ void ProcessMarket(const int index,const bool permit)
       if(chosen<0)
          return;
       TradePlan plan;
-      if(PositionSlot(s,signals[chosen].strategy,direction) &&
-         MakePlan(markets[index],tick,signals[chosen],plan))
+      if(!PositionSlot(s,signals[chosen].strategy,direction))
+         gateCounts[GATE_POSITION_SLOT]++;
+      else if(MakePlan(markets[index],tick,signals[chosen],plan))
       {
          lastAttempt[index]=now;
          Submit(markets[index],signals[chosen],plan);
@@ -1333,17 +1418,17 @@ void HandleButton(const string key)
 int OnInit()
 {
    tester=(bool)MQLInfoInteger(MQL_TESTER);
-   Print("QTE 1.02 INIT | chart=",_Symbol," | Symbols=",Symbols,
+   Print("QTE 1.03 INIT | chart=",_Symbol," | Symbols=",Symbols,
          " | tester=",tester," | StartOnLoad=",StartOnLoad,
          " | ConfirmCostInputs=",ConfirmCostInputs);
    if(!AllowedAccount())
    {
-      Print("QTE 1.02: use a demo account or Strategy Tester.");
+      Print("QTE 1.03: use a demo account or Strategy Tester.");
       return INIT_PARAMETERS_INCORRECT;
    }
    if(!InputsValid())
    {
-      Print("QTE 1.02: invalid EA inputs. Check risk, strategy and execution settings.");
+      Print("QTE 1.03: invalid EA inputs. Check risk, strategy and execution settings.");
       return INIT_PARAMETERS_INCORRECT;
    }
    activeMode=RiskMode;
@@ -1351,17 +1436,18 @@ int OnInit()
    trade.SetAsyncMode(false);
    if(!OpenState())
    {
-      Print("QTE 1.02: could not open account risk state.");
+      Print("QTE 1.03: could not open account risk state.");
       return INIT_FAILED;
    }
    if(!LoadMarkets())
    {
-      Print("QTE 1.02: no market state available. Chart=",_Symbol);
+      Print("QTE 1.03: no market state available. Chart=",_Symbol);
       return INIT_FAILED;
    }
-   if(!EventSetMillisecondTimer(PollMilliseconds))
+   const bool chartOnlyTest=tester && ArraySize(markets)==1 && markets[0].symbol==_Symbol;
+   if(!chartOnlyTest && !EventSetMillisecondTimer(PollMilliseconds))
    {
-      Print("QTE 1.02: timer initialization failed. Error=",GetLastError());
+      Print("QTE 1.03: timer initialization failed. Error=",GetLastError());
       return INIT_FAILED;
    }
    if(WriteExecutionLog)
@@ -1373,11 +1459,12 @@ int OnInit()
          FileWrite(ledger,"server_time","symbol","action","strategy","retcode","order",
                    "deal","price","lots","estimated_risk","estimated_reward","elapsed_us");
    }
-   running=StartOnLoad;
-   if(tester && !StartOnLoad)
-      Print("QTE 1.02: tester entries paused; set StartOnLoad=true.");
+   running=StartOnLoad || (tester && AutoStartTester);
+   Print("QTE 1.03 MODE | scanning=",running," | chart_tick_only=",chartOnlyTest);
+   if(tester && !running)
+      Print("QTE 1.03: tester entries paused; set AutoStartTester=true.");
    if(!ConfirmCostInputs)
-      Print("QTE 1.02: entries blocked until broker fee inputs are confirmed.");
+      Print("QTE 1.03: entries blocked until broker fee inputs are confirmed.");
    if(EnableAI)
       Print("QTE: AI input enabled, calibrated runtime model unavailable; rule strategies only.");
    DrawPanel(true);
@@ -1406,20 +1493,21 @@ void Pump(const bool chartTick)
    }
 
    const bool ready=RefreshRisk();
-   if((dailyLock || emergency || finishFlatten) && CanSend() && GetTickCount64()>=nextFlatten)
+   const bool canTrade=CanSend();
+   if((dailyLock || emergency || finishFlatten) && canTrade && GetTickCount64()>=nextFlatten)
    {
       nextFlatten=GetTickCount64()+1000;
       if(FlattenOwned())
          finishFlatten=false;
    }
-   if(ready && !dailyLock && !emergency && !finishFlatten && CanSend())
+   if(ready && !dailyLock && !emergency && !finishFlatten && canTrade)
       ManagePositions();
 
    for(int i=0;i<ArraySize(markets);i++)
    {
       if(chartTick && markets[i].symbol!=_Symbol)
          continue;
-      ProcessMarket(i,ready && running && CanSend() && !finishFlatten);
+      ProcessMarket(i,ready,canTrade);
    }
    DrawPanel(false);
 }
@@ -1446,6 +1534,19 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
 // The terminal's standard tester report remains the authoritative account curve.
 double OnTester()
 {
+   Print("QTE 1.03 DIAG | quotes=",gateCounts[GATE_QUOTES]," warmup=",gateCounts[GATE_WARMUP],
+         " evaluated=",gateCounts[GATE_EVALUATED]," no_signal=",gateCounts[GATE_NO_SIGNAL],
+         " low_score=",gateCounts[GATE_LOW_SCORE]," paused=",gateCounts[GATE_PAUSED],
+         " fees_unconfirmed=",gateCounts[GATE_FEES]," permissions=",gateCounts[GATE_PERMISSIONS],
+         " account_risk=",gateCounts[GATE_ACCOUNT_RISK]," last_status=",statusText);
+   Print("QTE 1.03 DIAG | spread=",gateCounts[GATE_SPREAD]," stale=",gateCounts[GATE_STALE],
+         " session=",gateCounts[GATE_SESSION]," cooldown=",gateCounts[GATE_COOLDOWN],
+         " conflict=",gateCounts[GATE_CONFLICT]," position_slot=",gateCounts[GATE_POSITION_SLOT],
+         " symbol_rules=",gateCounts[GATE_SYMBOL_RULES]," minimum_lot_or_budget=",gateCounts[GATE_MIN_LOT],
+         " stop_or_target=",gateCounts[GATE_STOP_TARGET]," margin=",gateCounts[GATE_MARGIN]);
+   Print("QTE 1.03 DIAG | check_rejected=",gateCounts[GATE_CHECK_REJECT]," check_code=",lastCheckCode,
+         " sent=",gateCounts[GATE_SENT]," fills=",gateCounts[GATE_FILLED],
+         " send_unconfirmed=",gateCounts[GATE_SEND_REJECT]," send_code=",lastSendCode);
    PrintFormat("QTE TESTER | trades %.0f | net %.2f | gross profit %.2f | gross loss %.2f | "
                "equity DD %.2f%% | profit factor %.4f",
                TesterStatistics(STAT_TRADES),TesterStatistics(STAT_PROFIT),
