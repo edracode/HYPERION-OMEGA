@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright   "OurOBoros Quantitative Engineering"
 #property link        "https://www.mql5.com"
-#property version     "2.01"
-#property description "OurOBoros Vx V2.01 - Bidirectional Anti-Martingale, Smart Floating Hedge, Adaptive Pyramiding & Stagnant Basket Recovery Engine"
+#property version     "2.02"
+#property description "OurOBoros Vx V2.02 - Anti-Stacking Bidirectional Anti-Martingale, Smart Hedge, Adaptive Pyramiding & Basket Trailing EA"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -93,10 +93,11 @@ input bool            InpEnableBearishPyramiding       = true;             // En
 input bool            InpEnableAdaptiveGrid            = true;             // Enable Adaptive ATR/Regime Grid Distance
 input bool            InpEnableReversalAdaptation      = true;             // Enable Intelligent Reversal Adaptation
 input int             InpATRPeriod                     = 14;               // ATR Period for Adaptive Grid
-input double          InpGridATRMultiplier             = 0.45;             // Grid ATR Multiplier (Optimizable)
-input double          InpMinimumGridDistancePoints     = 35.0;             // Minimum Grid Distance in Points (Optimizable)
-input double          InpDirectionalConfirmThreshold   = 0.15;             // Directional Confirmation Threshold (0.05 - 0.80)
-input double          InpReversalConfirmThreshold      = 0.22;             // Reversal Confirmation Threshold (0.10 - 0.90)
+input double          InpGridATRMultiplier             = 0.50;             // Grid ATR Multiplier (Optimizable)
+input double          InpMinimumGridDistancePoints     = 100.0;            // Minimum Grid Distance in Points (Anti-Stacking)
+input int             InpMinOrderCooldownSec           = 3;                // Min Seconds Between Same-Side Orders
+input double          InpDirectionalConfirmThreshold   = 0.20;             // Directional Confirmation Threshold (0.05 - 0.80)
+input double          InpReversalConfirmThreshold      = 0.26;             // Reversal Confirmation Threshold (0.10 - 0.90)
 
 input group "=== 4. BASKET PROFIT & TRAILING MAXIMIZATION ==="
 input double          InpMinimumBasketProfitPercent    = 2.00;             // Minimum Normal Basket Profit (%)
@@ -174,7 +175,9 @@ struct BasketMetrics
    double            buyWeightedAvgPrice;
    double            sellWeightedAvgPrice;
    double            highestBuyPrice;
-   double            lowestSellPrice;
+   double            lowestBuyPrice;
+   double            nearestBuyDistance;
+   double            nearestSellDistance;
    double            buyFloatingPnL;
    double            sellFloatingPnL;
    double            floatingGrossPnL;
@@ -251,6 +254,10 @@ int                  g_attemptedRecoveryBaskets = 0;
 double               g_totalRealizedAllTime   = 0.0;
 double               g_peakAccountEquity      = 0.0;
 double               g_maxObservedDrawdownPct = 0.0;
+
+//--- Anti-Stacking Order Cooldown Timestamps
+datetime             g_lastBuyOrderTime       = 0;
+datetime             g_lastSellOrderTime      = 0;
 
 //--- Cached Indicator Handles
 int                  g_hATR                   = INVALID_HANDLE;
@@ -741,6 +748,8 @@ void InitializeNewBasketCycle()
   {
    ZeroMemory(g_state);
    ArrayResize(g_countedOrderTickets, 0);
+   g_lastBuyOrderTime  = 0;
+   g_lastSellOrderTime = 0;
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -902,6 +911,11 @@ bool ExecuteLayerOrder(ENUM_POSITION_TYPE dir, double lot, string phaseTag, doub
          if(fillPrice <= 0.0)
             fillPrice = price;
          executedPrice = fillPrice;
+
+         if(dir == POSITION_TYPE_BUY)
+            g_lastBuyOrderTime = TimeCurrent();
+         else
+            g_lastSellOrderTime = TimeCurrent();
 
          if(!InpEnableDuplicatePrevention || !IsOrderTicketCounted(orderTicket))
            {
@@ -1224,14 +1238,14 @@ bool AnalyzeMarketMicrostructureAndRegime(MarketAnalysisResult &out)
    else
       out.regime = REGIME_CHOPPY_WHIPSAW;
 
-   //--- 7. Regime-Adaptive Weighted Ensemble
-   double wTrend = 0.24, wMom = 0.26, wStruct = 0.22, wQuant = 0.13, wTick = 0.15;
+   //--- 7. Regime-Adaptive Weighted Ensemble (Stable Multi-Indicator Consensus)
+   double wTrend = 0.26, wMom = 0.26, wStruct = 0.22, wQuant = 0.14, wTick = 0.12;
    if(out.regime == REGIME_TRENDING_STRONG)
-     { wTrend = 0.30; wMom = 0.26; wStruct = 0.20; wQuant = 0.12; wTick = 0.12; }
+     { wTrend = 0.32; wMom = 0.26; wStruct = 0.20; wQuant = 0.12; wTick = 0.10; }
    else if(out.regime == REGIME_VOLATILE_BREAKOUT)
-     { wTrend = 0.18; wMom = 0.30; wStruct = 0.22; wQuant = 0.10; wTick = 0.20; }
+     { wTrend = 0.20; wMom = 0.30; wStruct = 0.22; wQuant = 0.12; wTick = 0.16; }
    else if(out.regime == REGIME_SIDEWAYS_RANGING || out.regime == REGIME_CHOPPY_WHIPSAW)
-     { wTrend = 0.18; wMom = 0.27; wStruct = 0.25; wQuant = 0.15; wTick = 0.15; }
+     { wTrend = 0.20; wMom = 0.26; wStruct = 0.26; wQuant = 0.16; wTick = 0.12; }
 
    out.netScore = wTrend * trendScore + wMom * momentumScore + wStruct * structScore + wQuant * quantScore + wTick * tickScore;
    out.netScore = MathMax(-1.0, MathMin(1.0, out.netScore));
@@ -1242,12 +1256,44 @@ bool AnalyzeMarketMicrostructureAndRegime(MarketAnalysisResult &out)
    out.momentumStrength = MathAbs(momentumScore);
    out.entryOpportunityScore = MathMin(1.0, 0.55 * MathAbs(out.netScore) + 0.25 * out.momentumStrength + 0.20 * MathAbs(tickScore));
 
-   //--- 8. Adaptive Grid Distance Calculation
+   if(out.netScore >= InpDirectionalConfirmThreshold)
+      out.direction = DIR_BULLISH;
+   else if(out.netScore <= -InpDirectionalConfirmThreshold)
+      out.direction = DIR_BEARISH;
+   else
+      out.direction = DIR_NEUTRAL;
+
+   //--- 8. Reversal Probability & Pullback Filtering
+   int prevDir = g_state.activeTrendDirection;
+   double displacementFromAnchor = (mid - g_state.activeDirectionalAnchor) / atr;
+
+   if(prevDir == DIR_BULLISH && out.direction == DIR_BEARISH)
+     {
+      double revScore = 0.45 * out.bearishScore + 0.30 * MathMax(0.0, -displacementFromAnchor) + 0.25 * MathMax(0.0, -tickScore);
+      out.reversalProbability = MathMin(1.0, revScore);
+      out.isReversalConfirmed = (out.netScore <= -InpReversalConfirmThreshold && displacementFromAnchor <= -0.35);
+      out.isPullbackOnly      = !out.isReversalConfirmed;
+     }
+   else if(prevDir == DIR_BEARISH && out.direction == DIR_BULLISH)
+     {
+      double revScore = 0.45 * out.bullishScore + 0.30 * MathMax(0.0, displacementFromAnchor) + 0.25 * MathMax(0.0, tickScore);
+      out.reversalProbability = MathMin(1.0, revScore);
+      out.isReversalConfirmed = (out.netScore >= InpReversalConfirmThreshold && displacementFromAnchor >= 0.35);
+      out.isPullbackOnly      = !out.isReversalConfirmed;
+     }
+   else
+     {
+      out.reversalProbability = 0.0;
+      out.isReversalConfirmed = false;
+      out.isPullbackOnly      = false;
+     }
+
+   //--- 9. Adaptive Grid Distance Calculation
    double regimeFactor = 1.0;
    if(out.regime == REGIME_TRENDING_STRONG)
-      regimeFactor = 0.78;
+      regimeFactor = 0.85;
    else if(out.regime == REGIME_VOLATILE_BREAKOUT)
-      regimeFactor = 0.90;
+      regimeFactor = 0.95;
    else if(out.regime == REGIME_SIDEWAYS_RANGING)
       regimeFactor = 1.25;
    else if(out.regime == REGIME_CHOPPY_WHIPSAW)
@@ -1258,50 +1304,8 @@ bool AnalyzeMarketMicrostructureAndRegime(MarketAnalysisResult &out)
                           : InpMinimumGridDistancePoints;
 
    double tickSizePts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE) / point;
-   double minValidPts = MathMax(InpMinimumGridDistancePoints, MathMax(tickSizePts * 2.0, 5.0));
+   double minValidPts = MathMax(InpMinimumGridDistancePoints, MathMax(tickSizePts * 2.0, 10.0));
    out.dynamicGridPoints = MathMax(minValidPts, rawGridPoints);
-
-   //--- 9. Fast Reversal Displacement Detection (Peak Buy / Trough Sell Awareness)
-   double gridPrice = out.dynamicGridPoints * point;
-   double buyPeakRef  = MathMax(g_state.activeDirectionalAnchor, MathMax(g_metrics.highestBuyPrice, swingHigh));
-   double sellLowRef  = (g_metrics.lowestSellPrice > 0.0)
-                        ? MathMin(g_state.activeDirectionalAnchor, MathMin(g_metrics.lowestSellPrice, swingLow))
-                        : MathMin(g_state.activeDirectionalAnchor, swingLow);
-
-   bool sharpDropFromTop    = (g_metrics.buyPositions > 0 && (buyPeakRef - bid) >= gridPrice * 1.15 && (momentumScore < -0.15 || tickScore < -0.15));
-   bool sharpRiseFromBottom = (g_metrics.sellPositions > 0 && (ask - sellLowRef) >= gridPrice * 1.15 && (momentumScore > 0.15 || tickScore > 0.15));
-
-   if(out.netScore >= InpDirectionalConfirmThreshold || sharpRiseFromBottom)
-      out.direction = DIR_BULLISH;
-   else if(out.netScore <= -InpDirectionalConfirmThreshold || sharpDropFromTop)
-      out.direction = DIR_BEARISH;
-   else
-      out.direction = DIR_NEUTRAL;
-
-   //--- 10. Reversal Probability & Pullback Filtering
-   int prevDir = g_state.activeTrendDirection;
-   double displacementFromAnchor = (mid - g_state.activeDirectionalAnchor) / atr;
-
-   if((prevDir == DIR_BULLISH || g_metrics.buyPositions > g_metrics.sellPositions) && out.direction == DIR_BEARISH)
-     {
-      double revScore = 0.45 * out.bearishScore + 0.30 * MathMax(0.0, -displacementFromAnchor) + 0.25 * MathMax(0.0, -tickScore);
-      out.reversalProbability = MathMin(1.0, MathMax(revScore, sharpDropFromTop ? 0.75 : 0.0));
-      out.isReversalConfirmed = (out.netScore <= -InpReversalConfirmThreshold || displacementFromAnchor <= -0.30 || sharpDropFromTop);
-      out.isPullbackOnly      = !out.isReversalConfirmed;
-     }
-   else if((prevDir == DIR_BEARISH || g_metrics.sellPositions > g_metrics.buyPositions) && out.direction == DIR_BULLISH)
-     {
-      double revScore = 0.45 * out.bullishScore + 0.30 * MathMax(0.0, displacementFromAnchor) + 0.25 * MathMax(0.0, tickScore);
-      out.reversalProbability = MathMin(1.0, MathMax(revScore, sharpRiseFromBottom ? 0.75 : 0.0));
-      out.isReversalConfirmed = (out.netScore >= InpReversalConfirmThreshold || displacementFromAnchor >= 0.30 || sharpRiseFromBottom);
-      out.isPullbackOnly      = !out.isReversalConfirmed;
-     }
-   else
-     {
-      out.reversalProbability = 0.0;
-      out.isReversalConfirmed = false;
-      out.isPullbackOnly      = false;
-     }
 
    return(true);
   }
@@ -1334,6 +1338,8 @@ double GetPositionCommission(ulong posId)
 void ComputeBasketMetrics(BasketMetrics &m)
   {
    ZeroMemory(m);
+   m.nearestBuyDistance  = 1e9;
+   m.nearestSellDistance = 1e9;
 
    double ask       = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid       = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -1384,6 +1390,9 @@ void ComputeBasketMetrics(BasketMetrics &m)
          m.buyFloatingPnL += (profit + swap + comm);
          if(openPx > m.highestBuyPrice)
             m.highestBuyPrice = openPx;
+         double dist = MathAbs(ask - openPx);
+         if(dist < m.nearestBuyDistance)
+            m.nearestBuyDistance = dist;
         }
       else if(posType == POSITION_TYPE_SELL)
         {
@@ -1393,6 +1402,9 @@ void ComputeBasketMetrics(BasketMetrics &m)
          m.sellFloatingPnL += (profit + swap + comm);
          if(m.lowestSellPrice == 0.0 || openPx < m.lowestSellPrice)
             m.lowestSellPrice = openPx;
+         double dist = MathAbs(bid - openPx);
+         if(dist < m.nearestSellDistance)
+            m.nearestSellDistance = dist;
         }
      }
 
@@ -1808,7 +1820,7 @@ bool EvaluateBasketExitAndRecovery()
   }
 
 //+------------------------------------------------------------------+
-//| Directional Pyramiding & Intelligent Reversal Adaptation Engine  |
+//| Directional Pyramiding & Anti-Stacking Reversal Adaptation       |
 //+------------------------------------------------------------------+
 void ProcessPyramidingAndReversal()
   {
@@ -1822,8 +1834,40 @@ void ProcessPyramidingAndReversal()
    double mid   = 0.5 * (ask + bid);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double gridDistPrice = g_market.dynamicGridPoints * point;
+   datetime now = TimeCurrent();
 
-   //--- 1. State Classification
+   //--- 1. Update Trend State When Reversal Confirmed
+   if(InpEnableReversalAdaptation && g_market.isReversalConfirmed)
+     {
+      if(g_state.activeTrendDirection == DIR_BULLISH && g_market.direction == DIR_BEARISH)
+        {
+         g_eaState = STATE_REVERSAL_DETECTION;
+         g_state.activeTrendDirection    = DIR_BEARISH;
+         g_state.activeTrendStartPrice   = bid;
+         g_state.activeDirectionalAnchor = bid;
+         g_state.reversalCount++;
+         SavePersistentState();
+        }
+      else if(g_state.activeTrendDirection == DIR_BEARISH && g_market.direction == DIR_BULLISH)
+        {
+         g_eaState = STATE_REVERSAL_DETECTION;
+         g_state.activeTrendDirection    = DIR_BULLISH;
+         g_state.activeTrendStartPrice   = ask;
+         g_state.activeDirectionalAnchor = ask;
+         g_state.reversalCount++;
+         SavePersistentState();
+        }
+     }
+
+   if(g_state.activeTrendDirection == DIR_NEUTRAL && g_market.direction != DIR_NEUTRAL)
+     {
+      g_state.activeTrendDirection    = (int)g_market.direction;
+      g_state.activeTrendStartPrice   = mid;
+      g_state.activeDirectionalAnchor = (g_market.direction == DIR_BULLISH) ? ask : bid;
+      SavePersistentState();
+     }
+
+   //--- 2. State Classification
    if(g_market.regime == REGIME_SIDEWAYS_RANGING || g_market.regime == REGIME_CHOPPY_WHIPSAW)
       g_eaState = STATE_SIDEWAYS_ADAPTATION;
    else if(g_market.direction == DIR_BULLISH)
@@ -1833,41 +1877,26 @@ void ProcessPyramidingAndReversal()
    else
       g_eaState = STATE_MARKET_DIRECTION_DETECTION;
 
-   //--- 2. Bullish Trend & Reversal Pyramiding Execution
+   //--- 3. Anti-Stacking Bullish Trend & Reversal Pyramiding
    if(InpEnableBuy && InpEnableBullishPyramiding && g_market.direction == DIR_BULLISH && !g_market.isPullbackOnly)
      {
-      bool isSwitchingToBull = (g_state.activeTrendDirection != DIR_BULLISH);
-      bool noOpenBuyLayer    = (g_metrics.buyPositions == 0);
+      bool cooldownOk    = ((now - g_lastBuyOrderTime) >= InpMinOrderCooldownSec);
+      bool spatialClear  = (g_metrics.buyPositions == 0) || (g_metrics.nearestBuyDistance >= gridDistPrice);
 
-      if(isSwitchingToBull || noOpenBuyLayer)
+      if(cooldownOk && spatialClear)
         {
-         if(g_state.activeTrendDirection == DIR_BEARISH)
-           {
-            g_eaState = STATE_REVERSAL_DETECTION;
-            g_state.reversalCount++;
-           }
+         bool trendUpBreakout   = (g_metrics.buyPositions > 0 && ask >= (g_metrics.highestBuyPrice + gridDistPrice));
+         bool lowReversalEntry  = (g_metrics.buyPositions == 0) ||
+                                  (g_metrics.sellPositions > 0 &&
+                                   ask <= (g_metrics.highestBuyPrice - gridDistPrice) &&
+                                   (ask - g_metrics.lowestSellPrice) >= gridDistPrice);
 
-         double nextBuyLot = GetNextBuyLot();
-         double execPx = 0.0;
-         if(ExecuteLayerOrder(POSITION_TYPE_BUY, nextBuyLot, isSwitchingToBull ? "REV_BUY" : "PYR_BUY", execPx))
-           {
-            g_state.activeTrendDirection    = DIR_BULLISH;
-            g_state.activeTrendStartPrice   = execPx;
-            g_state.activeDirectionalAnchor = execPx;
-            SavePersistentState();
-           }
-        }
-      else
-        {
-         double refBuyAnchor = (g_state.lastBuyEntryPrice > 0.0)
-                               ? MathMax(g_state.activeDirectionalAnchor, g_state.lastBuyEntryPrice)
-                               : g_state.activeDirectionalAnchor;
-
-         if((ask - refBuyAnchor) >= gridDistPrice)
+         if(trendUpBreakout || lowReversalEntry)
            {
             double nextBuyLot = GetNextBuyLot();
             double execPx = 0.0;
-            if(ExecuteLayerOrder(POSITION_TYPE_BUY, nextBuyLot, "PYR_BUY", execPx))
+            string tag = trendUpBreakout ? "PYR_BUY" : "REV_BUY";
+            if(ExecuteLayerOrder(POSITION_TYPE_BUY, nextBuyLot, tag, execPx))
               {
                g_state.activeTrendDirection    = DIR_BULLISH;
                g_state.activeDirectionalAnchor = execPx;
@@ -1877,41 +1906,26 @@ void ProcessPyramidingAndReversal()
         }
      }
 
-   //--- 3. Bearish Trend & Reversal Pyramiding Execution
+   //--- 4. Anti-Stacking Bearish Trend & Reversal Pyramiding
    if(InpEnableSell && InpEnableBearishPyramiding && g_market.direction == DIR_BEARISH && !g_market.isPullbackOnly)
      {
-      bool isSwitchingToBear = (g_state.activeTrendDirection != DIR_BEARISH);
-      bool noOpenSellLayer   = (g_metrics.sellPositions == 0);
+      bool cooldownOk    = ((now - g_lastSellOrderTime) >= InpMinOrderCooldownSec);
+      bool spatialClear  = (g_metrics.sellPositions == 0) || (g_metrics.nearestSellDistance >= gridDistPrice);
 
-      if(isSwitchingToBear || noOpenSellLayer)
+      if(cooldownOk && spatialClear)
         {
-         if(g_state.activeTrendDirection == DIR_BULLISH)
-           {
-            g_eaState = STATE_REVERSAL_DETECTION;
-            g_state.reversalCount++;
-           }
+         bool trendDownBreakout = (g_metrics.sellPositions > 0 && bid <= (g_metrics.lowestSellPrice - gridDistPrice));
+         bool highReversalEntry = (g_metrics.sellPositions == 0) ||
+                                  (g_metrics.buyPositions > 0 &&
+                                   bid >= (g_metrics.lowestSellPrice + gridDistPrice) &&
+                                   (g_metrics.highestBuyPrice - bid) >= gridDistPrice);
 
-         double nextSellLot = GetNextSellLot();
-         double execPx = 0.0;
-         if(ExecuteLayerOrder(POSITION_TYPE_SELL, nextSellLot, isSwitchingToBear ? "REV_SELL" : "PYR_SELL", execPx))
-           {
-            g_state.activeTrendDirection    = DIR_BEARISH;
-            g_state.activeTrendStartPrice   = execPx;
-            g_state.activeDirectionalAnchor = execPx;
-            SavePersistentState();
-           }
-        }
-      else
-        {
-         double refSellAnchor = (g_state.lastSellEntryPrice > 0.0)
-                                ? MathMin(g_state.activeDirectionalAnchor, g_state.lastSellEntryPrice)
-                                : g_state.activeDirectionalAnchor;
-
-         if((refSellAnchor - bid) >= gridDistPrice)
+         if(trendDownBreakout || highReversalEntry)
            {
             double nextSellLot = GetNextSellLot();
             double execPx = 0.0;
-            if(ExecuteLayerOrder(POSITION_TYPE_SELL, nextSellLot, "PYR_SELL", execPx))
+            string tag = trendDownBreakout ? "PYR_SELL" : "REV_SELL";
+            if(ExecuteLayerOrder(POSITION_TYPE_SELL, nextSellLot, tag, execPx))
               {
                g_state.activeTrendDirection    = DIR_BEARISH;
                g_state.activeDirectionalAnchor = execPx;
