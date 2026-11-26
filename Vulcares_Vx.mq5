@@ -1,5 +1,5 @@
 #property strict
-#property version "1.03"
+#property version "1.04"
 #property description "Quantum Trading Engine | Strategy Tester and demo"
 
 #include <Trade/Trade.mqh>
@@ -32,6 +32,7 @@ input double MaxCurrencyClusterPercent=10.0;
 input double CommissionRoundTurnPerLot=0.0;
 input double MaxFeesAtStopPerLot=0.0;
 input bool ConfirmCostInputs=false;
+input bool AllowUnconfirmedCostsInTester=true;
 input double StopSlippageTicks=3.0;
 input double EntrySlippageTicks=2.0;
 input ulong Magic=761921;
@@ -89,6 +90,7 @@ enum EntryGate
 
 ulong gateCounts[GATE_COUNT];
 uint lastCheckCode=0,lastSendCode=0;
+datetime nextTesterProgress=0;
 
 bool RejectGate(const EntryGate gate)
 {
@@ -459,6 +461,11 @@ bool AllowedAccount()
           (AllowDemoTrading && AccountInfoInteger(ACCOUNT_TRADE_MODE)==ACCOUNT_TRADE_MODE_DEMO);
 }
 
+bool EntryCostsReady()
+{
+   return ConfirmCostInputs || (tester && AllowUnconfirmedCostsInTester);
+}
+
 bool InputsValid()
 {
    return !AllowLiveTrading && !EnableMartingale && !EnableUnlimitedAveraging &&
@@ -722,8 +729,8 @@ bool RefreshRisk()
       ActivateDailyLock();
    statusText=emergency ? "Emergency stop" : (dailyLock ? "Daily risk lock" :
               (!exposureOK ? "Unprotected exposure" : (foreignExposure ? "Other exposure / order" :
-              (!ConfirmCostInputs ? "Confirm broker costs" : (running ? "Scanning" : "Paused")))));
-   return !dailyLock && !emergency && exposureOK && !foreignExposure && ConfirmCostInputs && storageOK;
+              (!EntryCostsReady() ? "Confirm broker costs" : (running ? "Scanning" : "Paused")))));
+   return !dailyLock && !emergency && exposureOK && !foreignExposure && EntryCostsReady() && storageOK;
 }
 
 double RoundPrice(const string s,const double price,const bool up)
@@ -784,7 +791,12 @@ struct TradePlan
 
 bool CanSend()
 {
-   return AllowedAccount() && TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) &&
+   if(!AllowedAccount())
+      return false;
+   // Simulated order acceptance is determined by OrderCheck and OrderSend.
+   if(tester)
+      return true;
+   return TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) &&
           MQLInfoInteger(MQL_TRADE_ALLOWED) && AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) &&
           AccountInfoInteger(ACCOUNT_TRADE_EXPERT);
 }
@@ -1018,6 +1030,9 @@ bool Submit(const Market &market,const Signal &signal,const TradePlan &plan)
    {
       gateCounts[GATE_CHECK_REJECT]++;
       lastCheckCode=check.retcode;
+      if(tester && gateCounts[GATE_CHECK_REJECT]==1)
+         Print("QTE 1.04 CHECK | symbol=",market.symbol," code=",check.retcode,
+               " description=",check.comment," lots=",plan.lots);
       LogExecution(market.symbol,"CHECK_REJECT",signal.strategy,check.retcode,0,0,
                    plan.entry,plan.lots,plan.estimatedRisk,plan.estimatedReward,0);
       return true;
@@ -1051,6 +1066,9 @@ bool Submit(const Market &market,const Signal &signal,const TradePlan &plan)
    else
    {
       gateCounts[GATE_SEND_REJECT]++;
+      if(tester && gateCounts[GATE_SEND_REJECT]==1)
+         Print("QTE 1.04 SEND | symbol=",market.symbol," code=",result.retcode,
+               " description=",result.comment," lots=",plan.lots);
       if(result.retcode==TRADE_RETCODE_PLACED || result.retcode==TRADE_RETCODE_TIMEOUT ||
          result.retcode==TRADE_RETCODE_CONNECTION || result.order!=0 || result.deal!=0 ||
          (sent && (result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_DONE_PARTIAL)))
@@ -1239,7 +1257,7 @@ void ProcessMarket(const int index,const bool accountReady,const bool canTrade)
       gateCounts[GATE_PAUSED]++;
       return;
    }
-   if(!ConfirmCostInputs)
+   if(!EntryCostsReady())
    {
       gateCounts[GATE_FEES]++;
       return;
@@ -1418,17 +1436,17 @@ void HandleButton(const string key)
 int OnInit()
 {
    tester=(bool)MQLInfoInteger(MQL_TESTER);
-   Print("QTE 1.03 INIT | chart=",_Symbol," | Symbols=",Symbols,
+   Print("QTE 1.04 INIT | chart=",_Symbol," | Symbols=",Symbols,
          " | tester=",tester," | StartOnLoad=",StartOnLoad,
          " | ConfirmCostInputs=",ConfirmCostInputs);
    if(!AllowedAccount())
    {
-      Print("QTE 1.03: use a demo account or Strategy Tester.");
+      Print("QTE 1.04: use a demo account or Strategy Tester.");
       return INIT_PARAMETERS_INCORRECT;
    }
    if(!InputsValid())
    {
-      Print("QTE 1.03: invalid EA inputs. Check risk, strategy and execution settings.");
+      Print("QTE 1.04: invalid EA inputs. Check risk, strategy and execution settings.");
       return INIT_PARAMETERS_INCORRECT;
    }
    activeMode=RiskMode;
@@ -1436,18 +1454,18 @@ int OnInit()
    trade.SetAsyncMode(false);
    if(!OpenState())
    {
-      Print("QTE 1.03: could not open account risk state.");
+      Print("QTE 1.04: could not open account risk state.");
       return INIT_FAILED;
    }
    if(!LoadMarkets())
    {
-      Print("QTE 1.03: no market state available. Chart=",_Symbol);
+      Print("QTE 1.04: no market state available. Chart=",_Symbol);
       return INIT_FAILED;
    }
    const bool chartOnlyTest=tester && ArraySize(markets)==1 && markets[0].symbol==_Symbol;
    if(!chartOnlyTest && !EventSetMillisecondTimer(PollMilliseconds))
    {
-      Print("QTE 1.03: timer initialization failed. Error=",GetLastError());
+      Print("QTE 1.04: timer initialization failed. Error=",GetLastError());
       return INIT_FAILED;
    }
    if(WriteExecutionLog)
@@ -1460,11 +1478,14 @@ int OnInit()
                    "deal","price","lots","estimated_risk","estimated_reward","elapsed_us");
    }
    running=StartOnLoad || (tester && AutoStartTester);
-   Print("QTE 1.03 MODE | scanning=",running," | chart_tick_only=",chartOnlyTest);
+   Print("QTE 1.04 MODE | scanning=",running," | chart_tick_only=",chartOnlyTest);
    if(tester && !running)
-      Print("QTE 1.03: tester entries paused; set AutoStartTester=true.");
-   if(!ConfirmCostInputs)
-      Print("QTE 1.03: entries blocked until broker fee inputs are confirmed.");
+      Print("QTE 1.04: tester entries paused; set AutoStartTester=true.");
+   if(!EntryCostsReady())
+      Print("QTE 1.04: entries blocked until broker fee inputs are confirmed.");
+   else if(!ConfirmCostInputs)
+      Print("QTE 1.04: TESTER ONLY | execution test with unconfirmed fees.",
+            " Estimated SL/TP uses the configured cost inputs; verify broker fees before judging net RR.");
    if(EnableAI)
       Print("QTE: AI input enabled, calibrated runtime model unavailable; rule strategies only.");
    DrawPanel(true);
@@ -1481,6 +1502,26 @@ void OnDeinit(const int reason)
       FileClose(lease);
    ObjectsDeleteAll(0,"QTE_");
    Comment("");
+}
+
+void LogTesterProgress()
+{
+   if(!tester)
+      return;
+   const datetime now=TimeCurrent();
+   if(now<=0)
+      return;
+   if(nextTesterProgress==0)
+      nextTesterProgress=now+900;
+   if(now<nextTesterProgress)
+      return;
+   nextTesterProgress=now+86400;
+   Print("QTE 1.04 PROGRESS | status=",statusText," evaluated=",gateCounts[GATE_EVALUATED],
+         " no_signal=",gateCounts[GATE_NO_SIGNAL]," score=",gateCounts[GATE_LOW_SCORE],
+         " risk=",gateCounts[GATE_ACCOUNT_RISK]," spread=",gateCounts[GATE_SPREAD],
+         " lot_or_budget=",gateCounts[GATE_MIN_LOT]," stops=",gateCounts[GATE_STOP_TARGET],
+         " session=",gateCounts[GATE_SESSION]," checks_rejected=",gateCounts[GATE_CHECK_REJECT],
+         " sent=",gateCounts[GATE_SENT]," fills=",gateCounts[GATE_FILLED]);
 }
 
 void Pump(const bool chartTick)
@@ -1509,6 +1550,7 @@ void Pump(const bool chartTick)
          continue;
       ProcessMarket(i,ready,canTrade);
    }
+   LogTesterProgress();
    DrawPanel(false);
 }
 
@@ -1534,17 +1576,17 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
 // The terminal's standard tester report remains the authoritative account curve.
 double OnTester()
 {
-   Print("QTE 1.03 DIAG | quotes=",gateCounts[GATE_QUOTES]," warmup=",gateCounts[GATE_WARMUP],
+   Print("QTE 1.04 DIAG | quotes=",gateCounts[GATE_QUOTES]," warmup=",gateCounts[GATE_WARMUP],
          " evaluated=",gateCounts[GATE_EVALUATED]," no_signal=",gateCounts[GATE_NO_SIGNAL],
          " low_score=",gateCounts[GATE_LOW_SCORE]," paused=",gateCounts[GATE_PAUSED],
          " fees_unconfirmed=",gateCounts[GATE_FEES]," permissions=",gateCounts[GATE_PERMISSIONS],
          " account_risk=",gateCounts[GATE_ACCOUNT_RISK]," last_status=",statusText);
-   Print("QTE 1.03 DIAG | spread=",gateCounts[GATE_SPREAD]," stale=",gateCounts[GATE_STALE],
+   Print("QTE 1.04 DIAG | spread=",gateCounts[GATE_SPREAD]," stale=",gateCounts[GATE_STALE],
          " session=",gateCounts[GATE_SESSION]," cooldown=",gateCounts[GATE_COOLDOWN],
          " conflict=",gateCounts[GATE_CONFLICT]," position_slot=",gateCounts[GATE_POSITION_SLOT],
          " symbol_rules=",gateCounts[GATE_SYMBOL_RULES]," minimum_lot_or_budget=",gateCounts[GATE_MIN_LOT],
          " stop_or_target=",gateCounts[GATE_STOP_TARGET]," margin=",gateCounts[GATE_MARGIN]);
-   Print("QTE 1.03 DIAG | check_rejected=",gateCounts[GATE_CHECK_REJECT]," check_code=",lastCheckCode,
+   Print("QTE 1.04 DIAG | check_rejected=",gateCounts[GATE_CHECK_REJECT]," check_code=",lastCheckCode,
          " sent=",gateCounts[GATE_SENT]," fills=",gateCounts[GATE_FILLED],
          " send_unconfirmed=",gateCounts[GATE_SEND_REJECT]," send_code=",lastSendCode);
    PrintFormat("QTE TESTER | trades %.0f | net %.2f | gross profit %.2f | gross loss %.2f | "
