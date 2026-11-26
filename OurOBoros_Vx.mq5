@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright   "OurOBoros Quantitative Engineering"
 #property link        "https://www.mql5.com"
-#property version     "2.00"
-#property description "OurOBoros Vx V2.0 - Bidirectional Anti-Martingale, Smart Floating Hedge, Adaptive Pyramiding & Stagnant Basket Recovery Engine"
+#property version     "2.01"
+#property description "OurOBoros Vx V2.01 - Bidirectional Anti-Martingale, Smart Floating Hedge, Adaptive Pyramiding & Stagnant Basket Recovery Engine"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -95,8 +95,8 @@ input bool            InpEnableReversalAdaptation      = true;             // En
 input int             InpATRPeriod                     = 14;               // ATR Period for Adaptive Grid
 input double          InpGridATRMultiplier             = 0.45;             // Grid ATR Multiplier (Optimizable)
 input double          InpMinimumGridDistancePoints     = 35.0;             // Minimum Grid Distance in Points (Optimizable)
-input double          InpDirectionalConfirmThreshold   = 0.22;             // Directional Confirmation Threshold (0.05 - 0.80)
-input double          InpReversalConfirmThreshold      = 0.32;             // Reversal Confirmation Threshold (0.10 - 0.90)
+input double          InpDirectionalConfirmThreshold   = 0.15;             // Directional Confirmation Threshold (0.05 - 0.80)
+input double          InpReversalConfirmThreshold      = 0.22;             // Reversal Confirmation Threshold (0.10 - 0.90)
 
 input group "=== 4. BASKET PROFIT & TRAILING MAXIMIZATION ==="
 input double          InpMinimumBasketProfitPercent    = 2.00;             // Minimum Normal Basket Profit (%)
@@ -173,6 +173,8 @@ struct BasketMetrics
    double            grossExposure;
    double            buyWeightedAvgPrice;
    double            sellWeightedAvgPrice;
+   double            highestBuyPrice;
+   double            lowestSellPrice;
    double            buyFloatingPnL;
    double            sellFloatingPnL;
    double            floatingGrossPnL;
@@ -1127,14 +1129,14 @@ bool AnalyzeMarketMicrostructureAndRegime(MarketAnalysisResult &out)
    double macdNorm = MathMax(-1.0, MathMin(1.0, macdHist * 4.0));
    double cciNorm  = MathMax(-1.0, MathMin(1.0, cciBuf[0] / 150.0));
    double stochNorm= MathMax(-1.0, MathMin(1.0, (stochMain[0] - 50.0) / 35.0));
-   double rocNorm  = MathMax(-1.0, MathMin(1.0, (rates[0].close - rates[3].close) / (atr * 1.5)));
-   double momentumScore = 0.25 * rsiNorm + 0.25 * macdNorm + 0.15 * cciNorm + 0.15 * stochNorm + 0.20 * rocNorm;
+   double rocNorm  = MathMax(-1.0, MathMin(1.0, (rates[0].close - rates[2].close) / atr));
+   double momentumScore = 0.22 * rsiNorm + 0.22 * macdNorm + 0.15 * cciNorm + 0.16 * stochNorm + 0.25 * rocNorm;
    momentumScore = MathMax(-1.0, MathMin(1.0, momentumScore));
 
    //--- 3. Market Structure Module (HH/HL, LH/LL, BOS, CHoCH)
    double swingHigh = rates[1].high;
    double swingLow  = rates[1].low;
-   for(int b = 2; b <= 12; b++)
+   for(int b = 2; b <= 10; b++)
      {
       if(rates[b].high > swingHigh) swingHigh = rates[b].high;
       if(rates[b].low  < swingLow)  swingLow  = rates[b].low;
@@ -1157,7 +1159,7 @@ bool AnalyzeMarketMicrostructureAndRegime(MarketAnalysisResult &out)
 
    //--- 4. Quantitative & Statistical Module (Z-Score & Linear Regression Slope)
    double sumPx = 0.0, sumSq = 0.0;
-   int regN = 20;
+   int regN = 14;
    double sumX = 0.0, sumY = 0.0, sumXY = 0.0, sumXX = 0.0;
    for(int i = 0; i < regN; i++)
      {
@@ -1223,13 +1225,13 @@ bool AnalyzeMarketMicrostructureAndRegime(MarketAnalysisResult &out)
       out.regime = REGIME_CHOPPY_WHIPSAW;
 
    //--- 7. Regime-Adaptive Weighted Ensemble
-   double wTrend = 0.28, wMom = 0.24, wStruct = 0.20, wQuant = 0.14, wTick = 0.14;
+   double wTrend = 0.24, wMom = 0.26, wStruct = 0.22, wQuant = 0.13, wTick = 0.15;
    if(out.regime == REGIME_TRENDING_STRONG)
-     { wTrend = 0.34; wMom = 0.24; wStruct = 0.20; wQuant = 0.12; wTick = 0.10; }
+     { wTrend = 0.30; wMom = 0.26; wStruct = 0.20; wQuant = 0.12; wTick = 0.12; }
    else if(out.regime == REGIME_VOLATILE_BREAKOUT)
-     { wTrend = 0.22; wMom = 0.28; wStruct = 0.22; wQuant = 0.10; wTick = 0.18; }
+     { wTrend = 0.18; wMom = 0.30; wStruct = 0.22; wQuant = 0.10; wTick = 0.20; }
    else if(out.regime == REGIME_SIDEWAYS_RANGING || out.regime == REGIME_CHOPPY_WHIPSAW)
-     { wTrend = 0.20; wMom = 0.25; wStruct = 0.25; wQuant = 0.15; wTick = 0.15; }
+     { wTrend = 0.18; wMom = 0.27; wStruct = 0.25; wQuant = 0.15; wTick = 0.15; }
 
    out.netScore = wTrend * trendScore + wMom * momentumScore + wStruct * structScore + wQuant * quantScore + wTick * tickScore;
    out.netScore = MathMax(-1.0, MathMin(1.0, out.netScore));
@@ -1240,39 +1242,7 @@ bool AnalyzeMarketMicrostructureAndRegime(MarketAnalysisResult &out)
    out.momentumStrength = MathAbs(momentumScore);
    out.entryOpportunityScore = MathMin(1.0, 0.55 * MathAbs(out.netScore) + 0.25 * out.momentumStrength + 0.20 * MathAbs(tickScore));
 
-   if(out.netScore >= InpDirectionalConfirmThreshold)
-      out.direction = DIR_BULLISH;
-   else if(out.netScore <= -InpDirectionalConfirmThreshold)
-      out.direction = DIR_BEARISH;
-   else
-      out.direction = DIR_NEUTRAL;
-
-   //--- 8. Reversal Probability & Pullback Filtering
-   int prevDir = g_state.activeTrendDirection;
-   double displacementFromAnchor = (mid - g_state.activeDirectionalAnchor) / atr;
-
-   if(prevDir == DIR_BULLISH && out.netScore < 0.0)
-     {
-      double revScore = 0.45 * out.bearishScore + 0.30 * MathMax(0.0, -displacementFromAnchor) + 0.25 * MathMax(0.0, -tickScore);
-      out.reversalProbability = MathMin(1.0, revScore);
-      out.isReversalConfirmed = (out.netScore <= -InpReversalConfirmThreshold && displacementFromAnchor <= -0.35);
-      out.isPullbackOnly = (!out.isReversalConfirmed && displacementFromAnchor > -0.35);
-     }
-   else if(prevDir == DIR_BEARISH && out.netScore > 0.0)
-     {
-      double revScore = 0.45 * out.bullishScore + 0.30 * MathMax(0.0, displacementFromAnchor) + 0.25 * MathMax(0.0, tickScore);
-      out.reversalProbability = MathMin(1.0, revScore);
-      out.isReversalConfirmed = (out.netScore >= InpReversalConfirmThreshold && displacementFromAnchor >= 0.35);
-      out.isPullbackOnly = (!out.isReversalConfirmed && displacementFromAnchor < 0.35);
-     }
-   else
-     {
-      out.reversalProbability = 0.0;
-      out.isReversalConfirmed = false;
-      out.isPullbackOnly = false;
-     }
-
-   //--- 9. Adaptive Grid Distance Calculation
+   //--- 8. Adaptive Grid Distance Calculation
    double regimeFactor = 1.0;
    if(out.regime == REGIME_TRENDING_STRONG)
       regimeFactor = 0.78;
@@ -1290,6 +1260,48 @@ bool AnalyzeMarketMicrostructureAndRegime(MarketAnalysisResult &out)
    double tickSizePts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE) / point;
    double minValidPts = MathMax(InpMinimumGridDistancePoints, MathMax(tickSizePts * 2.0, 5.0));
    out.dynamicGridPoints = MathMax(minValidPts, rawGridPoints);
+
+   //--- 9. Fast Reversal Displacement Detection (Peak Buy / Trough Sell Awareness)
+   double gridPrice = out.dynamicGridPoints * point;
+   double buyPeakRef  = MathMax(g_state.activeDirectionalAnchor, MathMax(g_metrics.highestBuyPrice, swingHigh));
+   double sellLowRef  = (g_metrics.lowestSellPrice > 0.0)
+                        ? MathMin(g_state.activeDirectionalAnchor, MathMin(g_metrics.lowestSellPrice, swingLow))
+                        : MathMin(g_state.activeDirectionalAnchor, swingLow);
+
+   bool sharpDropFromTop    = (g_metrics.buyPositions > 0 && (buyPeakRef - bid) >= gridPrice * 1.15 && (momentumScore < -0.15 || tickScore < -0.15));
+   bool sharpRiseFromBottom = (g_metrics.sellPositions > 0 && (ask - sellLowRef) >= gridPrice * 1.15 && (momentumScore > 0.15 || tickScore > 0.15));
+
+   if(out.netScore >= InpDirectionalConfirmThreshold || sharpRiseFromBottom)
+      out.direction = DIR_BULLISH;
+   else if(out.netScore <= -InpDirectionalConfirmThreshold || sharpDropFromTop)
+      out.direction = DIR_BEARISH;
+   else
+      out.direction = DIR_NEUTRAL;
+
+   //--- 10. Reversal Probability & Pullback Filtering
+   int prevDir = g_state.activeTrendDirection;
+   double displacementFromAnchor = (mid - g_state.activeDirectionalAnchor) / atr;
+
+   if((prevDir == DIR_BULLISH || g_metrics.buyPositions > g_metrics.sellPositions) && out.direction == DIR_BEARISH)
+     {
+      double revScore = 0.45 * out.bearishScore + 0.30 * MathMax(0.0, -displacementFromAnchor) + 0.25 * MathMax(0.0, -tickScore);
+      out.reversalProbability = MathMin(1.0, MathMax(revScore, sharpDropFromTop ? 0.75 : 0.0));
+      out.isReversalConfirmed = (out.netScore <= -InpReversalConfirmThreshold || displacementFromAnchor <= -0.30 || sharpDropFromTop);
+      out.isPullbackOnly      = !out.isReversalConfirmed;
+     }
+   else if((prevDir == DIR_BEARISH || g_metrics.sellPositions > g_metrics.buyPositions) && out.direction == DIR_BULLISH)
+     {
+      double revScore = 0.45 * out.bullishScore + 0.30 * MathMax(0.0, displacementFromAnchor) + 0.25 * MathMax(0.0, tickScore);
+      out.reversalProbability = MathMin(1.0, MathMax(revScore, sharpRiseFromBottom ? 0.75 : 0.0));
+      out.isReversalConfirmed = (out.netScore >= InpReversalConfirmThreshold || displacementFromAnchor >= 0.30 || sharpRiseFromBottom);
+      out.isPullbackOnly      = !out.isReversalConfirmed;
+     }
+   else
+     {
+      out.reversalProbability = 0.0;
+      out.isReversalConfirmed = false;
+      out.isPullbackOnly      = false;
+     }
 
    return(true);
   }
@@ -1370,6 +1382,8 @@ void ComputeBasketMetrics(BasketMetrics &m)
          m.buyVolume += vol;
          buyWeightedSum += openPx * vol;
          m.buyFloatingPnL += (profit + swap + comm);
+         if(openPx > m.highestBuyPrice)
+            m.highestBuyPrice = openPx;
         }
       else if(posType == POSITION_TYPE_SELL)
         {
@@ -1377,6 +1391,8 @@ void ComputeBasketMetrics(BasketMetrics &m)
          m.sellVolume += vol;
          sellWeightedSum += openPx * vol;
          m.sellFloatingPnL += (profit + swap + comm);
+         if(m.lowestSellPrice == 0.0 || openPx < m.lowestSellPrice)
+            m.lowestSellPrice = openPx;
         }
      }
 
@@ -1698,6 +1714,10 @@ bool EvaluateBasketExitAndRecovery()
      {
       g_eaState = STATE_BASKET_PROFIT_TARGET_REACHED;
 
+      // Immediately lock at least the minimum target profit (2%+) once reached
+      g_state.profitTrailingActive = true;
+      g_state.protectedProfitFloorPercent = MathMax(g_state.protectedProfitFloorPercent, targetPct);
+
       bool strongMomentumContinuing = InpEnableDynamicProfitExtension
                                       && (g_market.trendConfidence >= 0.45)
                                       && (g_market.reversalProbability < 0.35)
@@ -1713,9 +1733,7 @@ bool EvaluateBasketExitAndRecovery()
         {
          if(g_state.peakBasketProfitPercent >= targetPct + InpTrailActivationBufferPercent)
            {
-            g_state.profitTrailingActive = true;
             g_eaState = STATE_BASKET_PROFIT_TRAILING;
-
             double dynamicFloor = MathMax(targetPct, g_state.peakBasketProfitPercent * InpTrailLockRatio);
             g_state.protectedProfitFloorPercent = MathMax(g_state.protectedProfitFloorPercent, dynamicFloor);
 
@@ -1805,43 +1823,7 @@ void ProcessPyramidingAndReversal()
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double gridDistPrice = g_market.dynamicGridPoints * point;
 
-   //--- 1. Reversal Detection & Directional Transition (Without Resetting Lot Counters!)
-   if(InpEnableReversalAdaptation && g_market.isReversalConfirmed)
-     {
-      if(g_state.activeTrendDirection == DIR_BULLISH && g_market.direction == DIR_BEARISH)
-        {
-         g_eaState = STATE_REVERSAL_DETECTION;
-         g_state.activeTrendDirection    = DIR_BEARISH;
-         g_state.activeTrendStartPrice   = bid;
-         g_state.activeDirectionalAnchor = bid;
-         g_state.reversalCount++;
-         SavePersistentState();
-         PrintFormat("[OurOBoros Vx] Reversal confirmed: BULLISH -> BEARISH | Anchor=%.5f | Preserved SellCnt=%d (NextSell=%.2f)",
-                     bid, g_state.sellLayerCounter, GetNextSellLot());
-        }
-      else if(g_state.activeTrendDirection == DIR_BEARISH && g_market.direction == DIR_BULLISH)
-        {
-         g_eaState = STATE_REVERSAL_DETECTION;
-         g_state.activeTrendDirection    = DIR_BULLISH;
-         g_state.activeTrendStartPrice   = ask;
-         g_state.activeDirectionalAnchor = ask;
-         g_state.reversalCount++;
-         SavePersistentState();
-         PrintFormat("[OurOBoros Vx] Reversal confirmed: BEARISH -> BULLISH | Anchor=%.5f | Preserved BuyCnt=%d (NextBuy=%.2f)",
-                     ask, g_state.buyLayerCounter, GetNextBuyLot());
-        }
-     }
-
-   //--- 2. Initialize Active Trend Direction from Neutral
-   if(g_state.activeTrendDirection == DIR_NEUTRAL && g_market.direction != DIR_NEUTRAL)
-     {
-      g_state.activeTrendDirection    = (int)g_market.direction;
-      g_state.activeTrendStartPrice   = mid;
-      g_state.activeDirectionalAnchor = (g_market.direction == DIR_BULLISH) ? ask : bid;
-      SavePersistentState();
-     }
-
-   //--- 3. State Classification
+   //--- 1. State Classification
    if(g_market.regime == REGIME_SIDEWAYS_RANGING || g_market.regime == REGIME_CHOPPY_WHIPSAW)
       g_eaState = STATE_SIDEWAYS_ADAPTATION;
    else if(g_market.direction == DIR_BULLISH)
@@ -1851,44 +1833,90 @@ void ProcessPyramidingAndReversal()
    else
       g_eaState = STATE_MARKET_DIRECTION_DETECTION;
 
-   //--- 4. Bullish Trend Pyramiding Execution
+   //--- 2. Bullish Trend & Reversal Pyramiding Execution
    if(InpEnableBuy && InpEnableBullishPyramiding && g_market.direction == DIR_BULLISH && !g_market.isPullbackOnly)
      {
-      double refBuyAnchor = MathMax(g_state.activeDirectionalAnchor, g_state.lastBuyEntryPrice);
-      if(g_state.activeTrendDirection == DIR_BULLISH && g_state.activeDirectionalAnchor > 0.0)
-         refBuyAnchor = g_state.activeDirectionalAnchor;
+      bool isSwitchingToBull = (g_state.activeTrendDirection != DIR_BULLISH);
+      bool noOpenBuyLayer    = (g_metrics.buyPositions == 0);
 
-      if((ask - refBuyAnchor) >= gridDistPrice)
+      if(isSwitchingToBull || noOpenBuyLayer)
         {
+         if(g_state.activeTrendDirection == DIR_BEARISH)
+           {
+            g_eaState = STATE_REVERSAL_DETECTION;
+            g_state.reversalCount++;
+           }
+
          double nextBuyLot = GetNextBuyLot();
          double execPx = 0.0;
-         if(ExecuteLayerOrder(POSITION_TYPE_BUY, nextBuyLot, "PYR_BUY", execPx))
+         if(ExecuteLayerOrder(POSITION_TYPE_BUY, nextBuyLot, isSwitchingToBull ? "REV_BUY" : "PYR_BUY", execPx))
            {
             g_state.activeTrendDirection    = DIR_BULLISH;
+            g_state.activeTrendStartPrice   = execPx;
             g_state.activeDirectionalAnchor = execPx;
             SavePersistentState();
            }
         }
+      else
+        {
+         double refBuyAnchor = (g_state.lastBuyEntryPrice > 0.0)
+                               ? MathMax(g_state.activeDirectionalAnchor, g_state.lastBuyEntryPrice)
+                               : g_state.activeDirectionalAnchor;
+
+         if((ask - refBuyAnchor) >= gridDistPrice)
+           {
+            double nextBuyLot = GetNextBuyLot();
+            double execPx = 0.0;
+            if(ExecuteLayerOrder(POSITION_TYPE_BUY, nextBuyLot, "PYR_BUY", execPx))
+              {
+               g_state.activeTrendDirection    = DIR_BULLISH;
+               g_state.activeDirectionalAnchor = execPx;
+               SavePersistentState();
+              }
+           }
+        }
      }
 
-   //--- 5. Bearish Trend Pyramiding Execution
+   //--- 3. Bearish Trend & Reversal Pyramiding Execution
    if(InpEnableSell && InpEnableBearishPyramiding && g_market.direction == DIR_BEARISH && !g_market.isPullbackOnly)
      {
-      double refSellAnchor = (g_state.lastSellEntryPrice > 0.0)
-                             ? MathMin(g_state.activeDirectionalAnchor, g_state.lastSellEntryPrice)
-                             : g_state.activeDirectionalAnchor;
-      if(g_state.activeTrendDirection == DIR_BEARISH && g_state.activeDirectionalAnchor > 0.0)
-         refSellAnchor = g_state.activeDirectionalAnchor;
+      bool isSwitchingToBear = (g_state.activeTrendDirection != DIR_BEARISH);
+      bool noOpenSellLayer   = (g_metrics.sellPositions == 0);
 
-      if((refSellAnchor - bid) >= gridDistPrice)
+      if(isSwitchingToBear || noOpenSellLayer)
         {
+         if(g_state.activeTrendDirection == DIR_BULLISH)
+           {
+            g_eaState = STATE_REVERSAL_DETECTION;
+            g_state.reversalCount++;
+           }
+
          double nextSellLot = GetNextSellLot();
          double execPx = 0.0;
-         if(ExecuteLayerOrder(POSITION_TYPE_SELL, nextSellLot, "PYR_SELL", execPx))
+         if(ExecuteLayerOrder(POSITION_TYPE_SELL, nextSellLot, isSwitchingToBear ? "REV_SELL" : "PYR_SELL", execPx))
            {
             g_state.activeTrendDirection    = DIR_BEARISH;
+            g_state.activeTrendStartPrice   = execPx;
             g_state.activeDirectionalAnchor = execPx;
             SavePersistentState();
+           }
+        }
+      else
+        {
+         double refSellAnchor = (g_state.lastSellEntryPrice > 0.0)
+                                ? MathMin(g_state.activeDirectionalAnchor, g_state.lastSellEntryPrice)
+                                : g_state.activeDirectionalAnchor;
+
+         if((refSellAnchor - bid) >= gridDistPrice)
+           {
+            double nextSellLot = GetNextSellLot();
+            double execPx = 0.0;
+            if(ExecuteLayerOrder(POSITION_TYPE_SELL, nextSellLot, "PYR_SELL", execPx))
+              {
+               g_state.activeTrendDirection    = DIR_BEARISH;
+               g_state.activeDirectionalAnchor = execPx;
+               SavePersistentState();
+              }
            }
         }
      }
@@ -2016,18 +2044,18 @@ void UpdateDashboard()
    int panelH = 445;
    color bgDark   = C'14,17,23';
    color bgCard   = C'22,27,36';
-   color clrGold  = C'212,175,55';
-   color clrGreen = C'34,197,94';
-   color clrRed   = C'239,68,68';
-   color clrAmber = C'245,158,11';
-   color clrMuted = C'160,170,185';
+   color cGold    = C'212,175,55';
+   color cGreen   = C'34,197,94';
+   color cRed     = C'239,68,68';
+   color cAmber   = C'245,158,11';
+   color cMuted   = C'160,170,185';
 
-   CreateRectLabel(UI_PREFIX + "BG", x, y + 26, panelW, panelH, bgDark, clrGold);
-   CreateTextLabel(UI_PREFIX + "TITLE", x + 12, y + 34, InpEAName + "  |  BIDIRECTIONAL ANTI-MARTINGALE ENGINE", clrGold, 10, "Arial Bold");
+   CreateRectLabel(UI_PREFIX + "BG", x, y + 26, panelW, panelH, bgDark, cGold);
+   CreateTextLabel(UI_PREFIX + "TITLE", x + 12, y + 34, InpEAName + "  |  BIDIRECTIONAL ANTI-MARTINGALE ENGINE", cGold, 10, "Arial Bold");
 
    string stateStr = EnumToString(g_eaState);
    StringReplace(stateStr, "STATE_", "");
-   CreateTextLabel(UI_PREFIX + "STATE", x + 12, y + 52, "STATE: " + stateStr + (g_pauseNewEntries ? " [PAUSED]" : ""), g_pauseNewEntries ? clrAmber : clrWhite, 8, "Consolas");
+   CreateTextLabel(UI_PREFIX + "STATE", x + 12, y + 52, "STATE: " + stateStr + (g_pauseNewEntries ? " [PAUSED]" : ""), g_pauseNewEntries ? cAmber : clrWhite, 8, "Consolas");
 
    int c1X = x + 12;
    int c2X = x + 278;
@@ -2045,81 +2073,81 @@ void UpdateDashboard()
    double monthlyPnL = ComputePeriodRealizedPnL(monthStart);
 
    CreateRectLabel(UI_PREFIX + "CARD_ACC", c1X - 4, rowY - 2, 256, 152, bgCard, C'45,52,66');
-   CreateTextLabel(UI_PREFIX + "H_ACC", c1X, rowY, "[ ACCOUNT INFORMATION ]", clrGold, 8, "Arial Bold");
+   CreateTextLabel(UI_PREFIX + "H_ACC", c1X, rowY, "[ ACCOUNT INFORMATION ]", cGold, 8, "Arial Bold");
    CreateTextLabel(UI_PREFIX + "A1", c1X, rowY + 15, StringFormat("Balance / Equity : %.2f / %.2f", AccountInfoDouble(ACCOUNT_BALANCE), AccountInfoDouble(ACCOUNT_EQUITY)), clrWhite);
-   CreateTextLabel(UI_PREFIX + "A2", c1X, rowY + 29, StringFormat("Free / Used Mgn  : %.2f / %.2f", g_metrics.freeMargin, g_metrics.usedMargin), clrMuted);
+   CreateTextLabel(UI_PREFIX + "A2", c1X, rowY + 29, StringFormat("Free / Used Mgn  : %.2f / %.2f", g_metrics.freeMargin, g_metrics.usedMargin), cMuted);
    CreateTextLabel(UI_PREFIX + "A3", c1X, rowY + 43, StringFormat("Margin Level     : %.1f%%", g_metrics.marginLevel), clrWhite);
-   CreateTextLabel(UI_PREFIX + "A4", c1X, rowY + 57, StringFormat("Floating P/L     : %+.2f", g_metrics.floatingNetPnL), (g_metrics.floatingNetPnL >= 0.0) ? clrGreen : clrRed);
+   CreateTextLabel(UI_PREFIX + "A4", c1X, rowY + 57, StringFormat("Floating P/L     : %+.2f", g_metrics.floatingNetPnL), (g_metrics.floatingNetPnL >= 0.0) ? cGreen : cRed);
    CreateTextLabel(UI_PREFIX + "A5", c1X, rowY + 71, StringFormat("Daily / Weekly   : %+.2f / %+.2f", dailyPnL, weeklyPnL), clrWhite);
    CreateTextLabel(UI_PREFIX + "A6", c1X, rowY + 85, StringFormat("Monthly Realized : %+.2f", monthlyPnL), clrWhite);
-   CreateTextLabel(UI_PREFIX + "A7", c1X, rowY + 99, StringFormat("Total Realized   : %+.2f", g_totalRealizedAllTime), (g_totalRealizedAllTime >= 0.0) ? clrGreen : clrRed);
-   CreateTextLabel(UI_PREFIX + "A8", c1X, rowY + 113, StringFormat("Max Obs Drawdown : %.2f%%", g_maxObservedDrawdownPct), clrAmber);
+   CreateTextLabel(UI_PREFIX + "A7", c1X, rowY + 99, StringFormat("Total Realized   : %+.2f", g_totalRealizedAllTime), (g_totalRealizedAllTime >= 0.0) ? cGreen : cRed);
+   CreateTextLabel(UI_PREFIX + "A8", c1X, rowY + 113, StringFormat("Max Obs Drawdown : %.2f%%", g_maxObservedDrawdownPct), cAmber);
    CreateTextLabel(UI_PREFIX + "A9", c1X, rowY + 127, StringFormat("Completed/Win%%   : %d (%.1f%%)", g_totalCompletedBaskets, (g_totalCompletedBaskets > 0) ? ((double)g_winningBaskets / g_totalCompletedBaskets * 100.0) : 0.0), clrWhite);
 
    int ageMin = (g_state.basketStartTime > 0) ? (int)((TimeCurrent() - g_state.basketStartTime) / 60) : 0;
    double targetUsd = g_state.basketStartBalance * (InpMinimumBasketProfitPercent / 100.0);
 
    CreateRectLabel(UI_PREFIX + "CARD_BSK", c2X - 4, rowY - 2, 254, 152, bgCard, C'45,52,66');
-   CreateTextLabel(UI_PREFIX + "H_BSK", c2X, rowY, "[ BASKET INFORMATION ]", clrGold, 8, "Arial Bold");
+   CreateTextLabel(UI_PREFIX + "H_BSK", c2X, rowY, "[ BASKET INFORMATION ]", cGold, 8, "Arial Bold");
    CreateTextLabel(UI_PREFIX + "B1", c2X, rowY + 15, StringFormat("Basket ID / Age  : #%I64d (%dm)", g_state.basketId % 1000000, ageMin), clrWhite);
-   CreateTextLabel(UI_PREFIX + "B2", c2X, rowY + 29, StringFormat("Start Balance    : %.2f", g_state.basketStartBalance), clrMuted);
-   CreateTextLabel(UI_PREFIX + "B3", c2X, rowY + 43, StringFormat("Basket Net P/L   : %+.2f (%+.2f%%)", g_metrics.basketNetPnL, g_metrics.basketNetPercent), (g_metrics.basketNetPnL >= 0.0) ? clrGreen : clrRed);
-   CreateTextLabel(UI_PREFIX + "B4", c2X, rowY + 57, StringFormat("Target (%.1f%%)    : +%.2f", InpMinimumBasketProfitPercent, targetUsd), clrGold);
+   CreateTextLabel(UI_PREFIX + "B2", c2X, rowY + 29, StringFormat("Start Balance    : %.2f", g_state.basketStartBalance), cMuted);
+   CreateTextLabel(UI_PREFIX + "B3", c2X, rowY + 43, StringFormat("Basket Net P/L   : %+.2f (%+.2f%%)", g_metrics.basketNetPnL, g_metrics.basketNetPercent), (g_metrics.basketNetPnL >= 0.0) ? cGreen : cRed);
+   CreateTextLabel(UI_PREFIX + "B4", c2X, rowY + 57, StringFormat("Target (%.1f%%)    : +%.2f", InpMinimumBasketProfitPercent, targetUsd), cGold);
    CreateTextLabel(UI_PREFIX + "B5", c2X, rowY + 71, StringFormat("Peak / Floor     : %.2f%% / %.2f%%", g_state.peakBasketProfitPercent, g_state.protectedProfitFloorPercent), clrWhite);
    CreateTextLabel(UI_PREFIX + "B6", c2X, rowY + 85, StringFormat("Est. Break-Even  : %.5f", g_metrics.estimatedBreakEvenPrice), clrWhite);
    CreateTextLabel(UI_PREFIX + "B7", c2X, rowY + 99, StringFormat("Open Positions   : %d (Net %.2f)", g_metrics.totalOpenPositions, g_metrics.netExposure), clrWhite);
-   CreateTextLabel(UI_PREFIX + "B8", c2X, rowY + 113, StringFormat("Reversal Count   : %d", g_state.reversalCount), clrMuted);
-   CreateTextLabel(UI_PREFIX + "B9", c2X, rowY + 127, StringFormat("Exit Cost Buffer : -%.2f", g_metrics.estimatedExitCosts), clrMuted);
+   CreateTextLabel(UI_PREFIX + "B8", c2X, rowY + 113, StringFormat("Reversal Count   : %d", g_state.reversalCount), cMuted);
+   CreateTextLabel(UI_PREFIX + "B9", c2X, rowY + 127, StringFormat("Exit Cost Buffer : -%.2f", g_metrics.estimatedExitCosts), cMuted);
 
    int r2Y = rowY + 158;
-   CreateRectLabel(UI_PREFIX + "CARD_BUY", c1X - 4, r2Y - 2, 256, 98, bgCard, clrGreen);
-   CreateTextLabel(UI_PREFIX + "H_BUY", c1X, r2Y, "[ BUY ANTI-MARTINGALE ENGINE ]", clrGreen, 8, "Arial Bold");
+   CreateRectLabel(UI_PREFIX + "CARD_BUY", c1X - 4, r2Y - 2, 256, 98, bgCard, cGreen);
+   CreateTextLabel(UI_PREFIX + "H_BUY", c1X, r2Y, "[ BUY ANTI-MARTINGALE ENGINE ]", cGreen, 8, "Arial Bold");
    CreateTextLabel(UI_PREFIX + "BUY1", c1X, r2Y + 15, StringFormat("Positions / Vol  : %d / %.2f lots", g_metrics.buyPositions, g_metrics.buyVolume), clrWhite);
-   CreateTextLabel(UI_PREFIX + "BUY2", c1X, r2Y + 29, StringFormat("BUY Counter      : %d (Max %.2f)", g_state.buyLayerCounter, InpMaximumBuyLot), clrGreen);
+   CreateTextLabel(UI_PREFIX + "BUY2", c1X, r2Y + 29, StringFormat("BUY Counter      : %d (Max %.2f)", g_state.buyLayerCounter, InpMaximumBuyLot), cGreen);
    CreateTextLabel(UI_PREFIX + "BUY3", c1X, r2Y + 43, StringFormat("Last / Next Lot  : %.2f -> %.2f", g_state.lastBuyLot, GetNextBuyLot()), clrWhite);
-   CreateTextLabel(UI_PREFIX + "BUY4", c1X, r2Y + 57, StringFormat("BUY Floating P/L : %+.2f", g_metrics.buyFloatingPnL), (g_metrics.buyFloatingPnL >= 0.0) ? clrGreen : clrRed);
-   CreateTextLabel(UI_PREFIX + "BUY5", c1X, r2Y + 71, StringFormat("BUY Avg Entry    : %.5f", g_metrics.buyWeightedAvgPrice), clrMuted);
+   CreateTextLabel(UI_PREFIX + "BUY4", c1X, r2Y + 57, StringFormat("BUY Floating P/L : %+.2f", g_metrics.buyFloatingPnL), (g_metrics.buyFloatingPnL >= 0.0) ? cGreen : cRed);
+   CreateTextLabel(UI_PREFIX + "BUY5", c1X, r2Y + 71, StringFormat("BUY Avg Entry    : %.5f", g_metrics.buyWeightedAvgPrice), cMuted);
 
-   CreateRectLabel(UI_PREFIX + "CARD_SELL", c2X - 4, r2Y - 2, 254, 98, bgCard, clrRed);
-   CreateTextLabel(UI_PREFIX + "H_SELL", c2X, r2Y, "[ SELL ANTI-MARTINGALE ENGINE ]", clrRed, 8, "Arial Bold");
+   CreateRectLabel(UI_PREFIX + "CARD_SELL", c2X - 4, r2Y - 2, 254, 98, bgCard, cRed);
+   CreateTextLabel(UI_PREFIX + "H_SELL", c2X, r2Y, "[ SELL ANTI-MARTINGALE ENGINE ]", cRed, 8, "Arial Bold");
    CreateTextLabel(UI_PREFIX + "SELL1", c2X, r2Y + 15, StringFormat("Positions / Vol  : %d / %.2f lots", g_metrics.sellPositions, g_metrics.sellVolume), clrWhite);
-   CreateTextLabel(UI_PREFIX + "SELL2", c2X, r2Y + 29, StringFormat("SELL Counter     : %d (Max %.2f)", g_state.sellLayerCounter, InpMaximumSellLot), clrRed);
+   CreateTextLabel(UI_PREFIX + "SELL2", c2X, r2Y + 29, StringFormat("SELL Counter     : %d (Max %.2f)", g_state.sellLayerCounter, InpMaximumSellLot), cRed);
    CreateTextLabel(UI_PREFIX + "SELL3", c2X, r2Y + 43, StringFormat("Last / Next Lot  : %.2f -> %.2f", g_state.lastSellLot, GetNextSellLot()), clrWhite);
-   CreateTextLabel(UI_PREFIX + "SELL4", c2X, r2Y + 57, StringFormat("SELL Floating P/L: %+.2f", g_metrics.sellFloatingPnL), (g_metrics.sellFloatingPnL >= 0.0) ? clrGreen : clrRed);
-   CreateTextLabel(UI_PREFIX + "SELL5", c2X, r2Y + 71, StringFormat("SELL Avg Entry   : %.5f", g_metrics.sellWeightedAvgPrice), clrMuted);
+   CreateTextLabel(UI_PREFIX + "SELL4", c2X, r2Y + 57, StringFormat("SELL Floating P/L: %+.2f", g_metrics.sellFloatingPnL), (g_metrics.sellFloatingPnL >= 0.0) ? cGreen : cRed);
+   CreateTextLabel(UI_PREFIX + "SELL5", c2X, r2Y + 71, StringFormat("SELL Avg Entry   : %.5f", g_metrics.sellWeightedAvgPrice), cMuted);
 
    int r3Y = r2Y + 104;
    string dirStr = (g_market.direction == DIR_BULLISH) ? "BULLISH" : ((g_market.direction == DIR_BEARISH) ? "BEARISH" : "NEUTRAL");
-   color dirClr  = (g_market.direction == DIR_BULLISH) ? clrGreen : ((g_market.direction == DIR_BEARISH) ? clrRed : clrMuted);
+   color dirClr  = (g_market.direction == DIR_BULLISH) ? cGreen : ((g_market.direction == DIR_BEARISH) ? cRed : cMuted);
    string regStr = EnumToString(g_market.regime);
    StringReplace(regStr, "REGIME_", "");
    double curSpreadPts = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
 
    CreateRectLabel(UI_PREFIX + "CARD_MKT", c1X - 4, r3Y - 2, 256, 98, bgCard, C'45,52,66');
-   CreateTextLabel(UI_PREFIX + "H_MKT", c1X, r3Y, "[ MARKET ANALYSIS ENGINE ]", clrGold, 8, "Arial Bold");
+   CreateTextLabel(UI_PREFIX + "H_MKT", c1X, r3Y, "[ MARKET ANALYSIS ENGINE ]", cGold, 8, "Arial Bold");
    CreateTextLabel(UI_PREFIX + "M1", c1X, r3Y + 15, StringFormat("Direction / Score: %s (%+.2f)", dirStr, g_market.netScore), dirClr);
    CreateTextLabel(UI_PREFIX + "M2", c1X, r3Y + 29, StringFormat("Market Regime    : %s", regStr), clrWhite);
    CreateTextLabel(UI_PREFIX + "M3", c1X, r3Y + 43, StringFormat("Trend / Mom Conf : %.0f%% / %.0f%%", g_market.trendConfidence * 100.0, g_market.momentumStrength * 100.0), clrWhite);
-   CreateTextLabel(UI_PREFIX + "M4", c1X, r3Y + 57, StringFormat("Reversal Prob    : %.0f%%", g_market.reversalProbability * 100.0), (g_market.reversalProbability > 0.5) ? clrAmber : clrMuted);
+   CreateTextLabel(UI_PREFIX + "M4", c1X, r3Y + 57, StringFormat("Reversal Prob    : %.0f%%", g_market.reversalProbability * 100.0), (g_market.reversalProbability > 0.5) ? cAmber : cMuted);
    CreateTextLabel(UI_PREFIX + "M5", c1X, r3Y + 71, StringFormat("Spread / Grid    : %.1f / %.1f pts", curSpreadPts, g_market.dynamicGridPoints), clrWhite);
 
    int noImpMin = (g_state.lastProfitImprovementTime > 0) ? (int)((TimeCurrent() - g_state.lastProfitImprovementTime) / 60) : 0;
    double recSuccessRate = (g_attemptedRecoveryBaskets > 0) ? ((double)g_completedRecoveryBaskets / g_attemptedRecoveryBaskets * 100.0) : 100.0;
 
-   CreateRectLabel(UI_PREFIX + "CARD_REC", c2X - 4, r3Y - 2, 254, 98, bgCard, g_state.recoveryModeActive ? clrAmber : C'45,52,66');
-   CreateTextLabel(UI_PREFIX + "H_REC", c2X, r3Y, "[ STAGNATION RECOVERY ENGINE ]", clrAmber, 8, "Arial Bold");
-   CreateTextLabel(UI_PREFIX + "R1", c2X, r3Y + 15, StringFormat("Stagnation/Recov : %s / %s", g_state.stagnationDetected ? "YES" : "NO", g_state.recoveryModeActive ? "ACTIVE" : "STANDBY"), g_state.recoveryModeActive ? clrAmber : clrWhite);
+   CreateRectLabel(UI_PREFIX + "CARD_REC", c2X - 4, r3Y - 2, 254, 98, bgCard, g_state.recoveryModeActive ? cAmber : C'45,52,66');
+   CreateTextLabel(UI_PREFIX + "H_REC", c2X, r3Y, "[ STAGNATION RECOVERY ENGINE ]", cAmber, 8, "Arial Bold");
+   CreateTextLabel(UI_PREFIX + "R1", c2X, r3Y + 15, StringFormat("Stagnation/Recov : %s / %s", g_state.stagnationDetected ? "YES" : "NO", g_state.recoveryModeActive ? "ACTIVE" : "STANDBY"), g_state.recoveryModeActive ? cAmber : clrWhite);
    CreateTextLabel(UI_PREFIX + "R2", c2X, r3Y + 29, StringFormat("BEP Distance     : %.1f pts", g_metrics.breakEvenDistancePoints), clrWhite);
-   CreateTextLabel(UI_PREFIX + "R3", c2X, r3Y + 43, StringFormat("No Gain / Dwell  : %dm / %dm", noImpMin, g_state.breakEvenDwellSeconds / 60), clrMuted);
+   CreateTextLabel(UI_PREFIX + "R3", c2X, r3Y + 43, StringFormat("No Gain / Dwell  : %dm / %dm", noImpMin, g_state.breakEvenDwellSeconds / 60), cMuted);
    CreateTextLabel(UI_PREFIX + "R4", c2X, r3Y + 57, StringFormat("Max Recov Loss   : -%.2f%%", InpMaximumRecoveryLossPercent), clrWhite);
    CreateTextLabel(UI_PREFIX + "R5", c2X, r3Y + 71, StringFormat("Recov Baskets    : %d (%.0f%%)", g_completedRecoveryBaskets, recSuccessRate), clrWhite);
 
    int btnY = r3Y + 105;
    CreateActionButton(BTN_AUTO,     c1X,       btnY, 96,  24, g_autoTradingEnabled ? "AUTO: ON" : "AUTO: OFF", g_autoTradingEnabled ? C'22,101,52' : C'127,29,29', clrWhite);
    CreateActionButton(BTN_PAUSE,    c1X + 101, btnY, 102, 24, "PAUSE ENTRIES", g_pauseNewEntries ? C'180,83,9' : C'30,41,59', clrWhite);
-   CreateActionButton(BTN_RESUME,   c1X + 208, btnY, 96,  24, "RESUME", C'30,41,59', clrGreen);
+   CreateActionButton(BTN_RESUME,   c1X + 208, btnY, 96,  24, "RESUME", C'30,41,59', cGreen);
    CreateActionButton(BTN_CLOSEALL, c1X + 309, btnY, 102, 24, "CLOSE ALL EA", C'153,27,27', clrWhite);
-   CreateActionButton(BTN_RESET,    c1X + 416, btnY, 100, 24, g_resetWhenFlatRequested ? "RESETTING..." : "RESET FLAT", C'30,41,59', clrAmber);
+   CreateActionButton(BTN_RESET,    c1X + 416, btnY, 100, 24, g_resetWhenFlatRequested ? "RESETTING..." : "RESET FLAT", C'30,41,59', cAmber);
 
    ChartRedraw(0);
   }
