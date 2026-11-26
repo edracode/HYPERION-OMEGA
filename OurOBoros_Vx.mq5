@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright   "OurOBoros Quantitative Engineering"
 #property link        "https://www.mql5.com"
-#property version     "2.03"
-#property description "OurOBoros Vx V2.03 - Auto-Compounding Anti-Martingale, Hedged Loss Trimming, Anti-Stacking & Basket Trailing EA"
+#property version     "2.02"
+#property description "OurOBoros Vx V2.02 - Anti-Stacking Bidirectional Anti-Martingale, Smart Hedge, Adaptive Pyramiding & Basket Trailing EA"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -73,34 +73,31 @@ input bool            InpEnableInitialDualEntry        = true;             // En
 input bool            InpEnableAutomaticRestart        = true;             // Enable Automatic Basket Restart
 input int             InpSlippagePoints                = 50;               // Execution Slippage Deviation (Points)
 
-input group "=== 2. BIDIRECTIONAL ANTI-MARTINGALE & COMPOUNDING ==="
-input double          InpInitialBuyLot                 = 0.01;             // Base Initial BUY Lot
-input double          InpInitialSellLot                = 0.01;             // Base Initial SELL Lot
-input double          InpBuyLotIncrement               = 0.01;             // Base BUY Linear Lot Increment
-input double          InpSellLotIncrement              = 0.01;             // Base SELL Linear Lot Increment
-input double          InpMaximumBuyLot                 = 0.05;             // Base Maximum Individual BUY Lot
-input double          InpMaximumSellLot                = 0.05;             // Base Maximum Individual SELL Lot
-input bool            InpEnableAutoCompounding         = true;             // Auto-Scale Lots With Account Balance Growth
-input double          InpCompoundingBaseBalance        = 1000.0;           // Reference Balance for 1.0x Base Lots
-input double          InpMaxCompoundingMultiplier      = 5.0;              // Maximum Lot Scaling Multiplier
+input group "=== 2. BIDIRECTIONAL ANTI-MARTINGALE SETTINGS ==="
+input double          InpInitialBuyLot                 = 0.01;             // Initial BUY Lot
+input double          InpInitialSellLot                = 0.01;             // Initial SELL Lot
+input double          InpBuyLotIncrement               = 0.01;             // BUY Linear Lot Increment
+input double          InpSellLotIncrement              = 0.01;             // SELL Linear Lot Increment
+input double          InpMaximumBuyLot                 = 0.02;             // Maximum Individual BUY Lot
+input double          InpMaximumSellLot                = 0.02;             // Maximum Individual SELL Lot
 input bool            InpEnableIndependentLotCounters  = true;             // Independent BUY/SELL Counters
 input bool            InpResetLotOnReversal            = false;            // Reset Lot on Reversal (Must be false)
 input bool            InpResetLotOnPartialClose        = false;            // Reset Lot on Partial Close (Must be false)
 input bool            InpResetLotAfterBasketClose      = true;             // Reset Lot Counters After Full Basket Close
 
-input group "=== 3. ANTI-STACKING & ADAPTIVE LAYERING SETTINGS ==="
-input int             InpMaxOpenPositionsPerSide       = 8;                // Max Active Open Positions Per Side (BUY / SELL)
+input group "=== 3. UNLIMITED ADAPTIVE LAYERING SETTINGS ==="
+input bool            InpEnableUnlimitedLayering       = true;             // Unlimited Layering (No Hard Cap)
 input bool            InpEnableTrendPyramiding         = true;             // Enable Trend-Following Pyramiding
 input bool            InpEnableBullishPyramiding       = true;             // Enable Bullish Pyramiding
 input bool            InpEnableBearishPyramiding       = true;             // Enable Bearish Pyramiding
 input bool            InpEnableAdaptiveGrid            = true;             // Enable Adaptive ATR/Regime Grid Distance
 input bool            InpEnableReversalAdaptation      = true;             // Enable Intelligent Reversal Adaptation
 input int             InpATRPeriod                     = 14;               // ATR Period for Adaptive Grid
-input double          InpGridATRMultiplier             = 0.85;             // Grid ATR Multiplier (XAUUSD Optimized)
-input double          InpMinimumGridDistancePoints     = 350.0;            // Minimum Grid Distance in Points (Anti-Stacking)
-input int             InpMinOrderCooldownSec           = 5;                // Min Seconds Between Same-Side Orders
-input double          InpDirectionalConfirmThreshold   = 0.22;             // Directional Confirmation Threshold (0.05 - 0.80)
-input double          InpReversalConfirmThreshold      = 0.28;             // Reversal Confirmation Threshold (0.10 - 0.90)
+input double          InpGridATRMultiplier             = 0.50;             // Grid ATR Multiplier (Optimizable)
+input double          InpMinimumGridDistancePoints     = 100.0;            // Minimum Grid Distance in Points (Anti-Stacking)
+input int             InpMinOrderCooldownSec           = 3;                // Min Seconds Between Same-Side Orders
+input double          InpDirectionalConfirmThreshold   = 0.20;             // Directional Confirmation Threshold (0.05 - 0.80)
+input double          InpReversalConfirmThreshold      = 0.26;             // Reversal Confirmation Threshold (0.10 - 0.90)
 
 input group "=== 4. BASKET PROFIT & TRAILING MAXIMIZATION ==="
 input double          InpMinimumBasketProfitPercent    = 2.00;             // Minimum Normal Basket Profit (%)
@@ -110,14 +107,14 @@ input double          InpTrailLockRatio                = 0.80;             // Pr
 input double          InpTrailActivationBufferPercent  = 0.35;             // Extra % Above Target to Activate Trailing
 input bool            InpEnableMaximumProfitCap        = false;            // Enable Maximum Profit Cap
 input double          InpMaximumProfitCapPercent       = 25.0;             // Maximum Profit Cap (%) if Enabled
-input bool            InpEnableSelectivePosOpt         = true;             // Enable Full-Lot Hedged Loss Trimming
+input bool            InpEnableSelectivePosOpt         = true;             // Enable Selective Position Optimization
 
 input group "=== 5. STAGNANT BASKET RECOVERY SETTINGS ==="
 input bool            InpEnableStagnationRecovery      = true;             // Enable Stagnant Basket BEP Recovery
-input int             InpStagnationMinAgeMinutes       = 20;               // Min Basket Age for Stagnation Check (Min)
-input int             InpStagnationMinPositions        = 10;               // Min Open Positions for Stagnation Check
-input int             InpNoMeaningfulImproveMinutes    = 12;               // Minutes Without Meaningful Profit Gain
-input int             InpBreakEvenDwellMinutes         = 5;                // Cumulative Minutes in Break-Even Zone
+input int             InpStagnationMinAgeMinutes       = 60;               // Min Basket Age for Stagnation Check (Min)
+input int             InpStagnationMinPositions        = 20;               // Min Open Positions for Stagnation Check
+input int             InpNoMeaningfulImproveMinutes    = 30;               // Minutes Without Meaningful Profit Gain
+input int             InpBreakEvenDwellMinutes         = 10;               // Cumulative Minutes in Break-Even Zone
 input double          InpBreakEvenZonePercent          = 0.10;             // Break-Even Proximity Zone (% of Start Balance)
 input double          InpMaximumRecoveryLossPercent    = 0.05;             // Max Tolerated Recovery Loss (% of Start Balance)
 input bool            InpEnableAutoRecoveryRestart     = true;             // Auto Start New Cycle After Recovery Close
@@ -127,7 +124,7 @@ input bool            InpEnableMaximumSpreadFilter     = false;            // Ma
 input double          InpMaxSpreadPointsIfEnabled      = 500.0;            // Max Spread Points (Only if Filter Enabled)
 input bool            InpEnableConventionalStopLoss    = false;            // Conventional Individual SL (Default: Disabled)
 input bool            InpEnableMarginValidation        = true;             // Validate Free Margin Before New Layer
-input double          InpMinFreeMarginLevelPercent     = 300.0;            // Minimum Margin Level (%) Safety Guard
+input double          InpMinFreeMarginLevelPercent     = 120.0;            // Minimum Margin Level (%) Safety Guard
 input bool            InpEnableDuplicatePrevention     = true;             // Enable Duplicate Order & Partial Fill Guard
 input bool            InpEnableTxReconciliation        = true;             // Enable Transaction Reconciliation
 input bool            InpEnablePersistentBasketState   = true;             // Enable Crash/Restart Persistent State
@@ -178,8 +175,6 @@ struct BasketMetrics
    double            buyWeightedAvgPrice;
    double            sellWeightedAvgPrice;
    double            highestBuyPrice;
-   double            lowestBuyPrice;
-   double            highestSellPrice;
    double            lowestSellPrice;
    double            nearestBuyDistance;
    double            nearestSellDistance;
@@ -203,7 +198,6 @@ struct BasketPersistentState
   {
    long              basketId;
    double            basketStartBalance;
-   double            basketLotScale;
    datetime          basketStartTime;
    double            initialBuyPrice;
    double            initialSellPrice;
@@ -372,51 +366,21 @@ double NormalizeLot(double rawLot)
   }
 
 //+------------------------------------------------------------------+
-//| Helper: Compute Auto-Compounding Lot Scale Factor                |
-//+------------------------------------------------------------------+
-double ComputeCurrentLotScale()
-  {
-   if(!InpEnableAutoCompounding)
-      return(1.0);
-   double bal  = AccountInfoDouble(ACCOUNT_BALANCE);
-   double base = MathMax(InpCompoundingBaseBalance, 100.0);
-   double raw  = bal / base;
-   return(MathMax(1.0, MathMin(InpMaxCompoundingMultiplier, raw)));
-  }
-
-double GetBasketLotScale()
-  {
-   return((g_state.basketLotScale >= 1.0) ? g_state.basketLotScale : ComputeCurrentLotScale());
-  }
-
-double GetEffectiveMaxBuyLot()
-  {
-   return(NormalizeLot(InpMaximumBuyLot * GetBasketLotScale()));
-  }
-
-double GetEffectiveMaxSellLot()
-  {
-   return(NormalizeLot(InpMaximumSellLot * GetBasketLotScale()));
-  }
-
-//+------------------------------------------------------------------+
 //| Helper: Calculate Next Independent BUY and SELL Lot              |
 //+------------------------------------------------------------------+
 double GetNextBuyLot()
   {
-   double scale    = GetBasketLotScale();
-   int buyStage    = InpEnableIndependentLotCounters ? g_state.buyLayerCounter : (g_state.buyLayerCounter + g_state.sellLayerCounter);
-   double raw      = (InpInitialBuyLot * scale) + ((InpBuyLotIncrement * scale) * (double)buyStage);
-   double capped   = MathMin(raw, InpMaximumBuyLot * scale);
+   int buyStage = InpEnableIndependentLotCounters ? g_state.buyLayerCounter : (g_state.buyLayerCounter + g_state.sellLayerCounter);
+   double raw = InpInitialBuyLot + (InpBuyLotIncrement * (double)buyStage);
+   double capped = MathMin(raw, InpMaximumBuyLot);
    return(NormalizeLot(capped));
   }
 
 double GetNextSellLot()
   {
-   double scale    = GetBasketLotScale();
-   int sellStage   = InpEnableIndependentLotCounters ? g_state.sellLayerCounter : (g_state.buyLayerCounter + g_state.sellLayerCounter);
-   double raw      = (InpInitialSellLot * scale) + ((InpSellLotIncrement * scale) * (double)sellStage);
-   double capped   = MathMin(raw, InpMaximumSellLot * scale);
+   int sellStage = InpEnableIndependentLotCounters ? g_state.sellLayerCounter : (g_state.buyLayerCounter + g_state.sellLayerCounter);
+   double raw = InpInitialSellLot + (InpSellLotIncrement * (double)sellStage);
+   double capped = MathMin(raw, InpMaximumSellLot);
    return(NormalizeLot(capped));
   }
 
@@ -513,7 +477,6 @@ void SavePersistentState()
 
    GlobalVariableSet(g_gvPrefix + "BASKET_ID",      (double)g_state.basketId);
    GlobalVariableSet(g_gvPrefix + "START_BAL",      g_state.basketStartBalance);
-   GlobalVariableSet(g_gvPrefix + "LOT_SCALE",      g_state.basketLotScale);
    GlobalVariableSet(g_gvPrefix + "START_TIME",     (double)g_state.basketStartTime);
    GlobalVariableSet(g_gvPrefix + "INIT_BUY_PX",    g_state.initialBuyPrice);
    GlobalVariableSet(g_gvPrefix + "INIT_SELL_PX",   g_state.initialSellPrice);
@@ -571,7 +534,6 @@ bool LoadPersistentState()
      {
       g_state.basketId                  = (long)GlobalVariableGet(g_gvPrefix + "BASKET_ID");
       g_state.basketStartBalance        = GlobalVariableGet(g_gvPrefix + "START_BAL");
-      g_state.basketLotScale            = GlobalVariableCheck(g_gvPrefix + "LOT_SCALE") ? GlobalVariableGet(g_gvPrefix + "LOT_SCALE") : 1.0;
       g_state.basketStartTime           = (datetime)GlobalVariableGet(g_gvPrefix + "START_TIME");
       g_state.initialBuyPrice           = GlobalVariableGet(g_gvPrefix + "INIT_BUY_PX");
       g_state.initialSellPrice          = GlobalVariableGet(g_gvPrefix + "INIT_SELL_PX");
@@ -688,8 +650,6 @@ void ReconcileBasketFromBroker()
          g_state.basketId = (detectedBasketId > 0) ? detectedBasketId : (long)TimeCurrent();
       if(g_state.basketStartBalance <= 0.0)
          g_state.basketStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-      if(g_state.basketLotScale < 1.0)
-         g_state.basketLotScale = ComputeCurrentLotScale();
       if(g_state.basketStartTime <= 0)
          g_state.basketStartTime = (earliestOpen > 0) ? earliestOpen : TimeCurrent();
 
@@ -797,7 +757,6 @@ void InitializeNewBasketCycle()
 
    g_state.basketId                  = (long)TimeCurrent() * 100 + (long)(GetTickCount() % 100);
    g_state.basketStartBalance        = AccountInfoDouble(ACCOUNT_BALANCE);
-   g_state.basketLotScale            = ComputeCurrentLotScale();
    g_state.basketStartTime           = TimeCurrent();
    g_state.initialBuyPrice           = ask;
    g_state.initialSellPrice          = bid;
@@ -830,8 +789,8 @@ void InitializeNewBasketCycle()
    g_state.initialHedgeCompleted     = false;
 
    SavePersistentState();
-   PrintFormat("[OurOBoros Vx] New Basket Initialized | BasketID=%I64d | StartBalance=%.2f | LotScale=%.2fx | RefPrice=%.5f",
-               g_state.basketId, g_state.basketStartBalance, g_state.basketLotScale, mid);
+   PrintFormat("[OurOBoros Vx] New Basket Initialized | BasketID=%I64d | StartBalance=%.2f | RefPrice=%.5f",
+               g_state.basketId, g_state.basketStartBalance, mid);
   }
 
 //+------------------------------------------------------------------+
@@ -861,7 +820,7 @@ bool ValidateOrderExecution(ENUM_ORDER_TYPE orderType, double volume, double pri
       double equity     = AccountInfoDouble(ACCOUNT_EQUITY);
       double usedMargin = AccountInfoDouble(ACCOUNT_MARGIN);
 
-      if(freeMargin <= marginRequired * 1.15)
+      if(freeMargin <= marginRequired * 1.05)
         {
          rejectReason = StringFormat("Insufficient free margin: Free=%.2f, Req=%.2f", freeMargin, marginRequired);
          return(false);
@@ -1008,7 +967,7 @@ bool ExecuteLayerOrder(ENUM_POSITION_TYPE dir, double lot, string phaseTag, doub
   }
 
 //+------------------------------------------------------------------+
-//| Simultaneous Dual Entry Engine (Scaled Initial BUY + SELL)       |
+//| Simultaneous Dual Entry Engine (BUY 0.01 + SELL 0.01)            |
 //+------------------------------------------------------------------+
 bool ExecuteInitialDualEntry()
   {
@@ -1046,20 +1005,16 @@ bool ExecuteInitialDualEntry()
         }
      }
 
-   double scale       = GetBasketLotScale();
-   double initBuyLot  = NormalizeLot(InpInitialBuyLot * scale);
-   double initSellLot = NormalizeLot(InpInitialSellLot * scale);
-
    bool buyOk  = (curBuy > 0) || !InpEnableBuy;
    bool sellOk = (curSell > 0) || !InpEnableSell;
    double pxBuy = existingBuyPx;
    double pxSell = existingSellPx;
 
    if(!buyOk)
-      buyOk = ExecuteLayerOrder(POSITION_TYPE_BUY, initBuyLot, "INIT_HEDGE", pxBuy);
+      buyOk = ExecuteLayerOrder(POSITION_TYPE_BUY, InpInitialBuyLot, "INIT_HEDGE", pxBuy);
 
    if(!sellOk)
-      sellOk = ExecuteLayerOrder(POSITION_TYPE_SELL, initSellLot, "INIT_HEDGE", pxSell);
+      sellOk = ExecuteLayerOrder(POSITION_TYPE_SELL, InpInitialSellLot, "INIT_HEDGE", pxSell);
 
    if(buyOk && sellOk)
      {
@@ -1076,8 +1031,8 @@ bool ExecuteInitialDualEntry()
       g_eaState = STATE_INITIAL_HEDGE_CONFIRMED;
       SavePersistentState();
 
-      PrintFormat("[OurOBoros Vx] Initial Hedge Confirmed | BasketID=%I64d | Scale=%.2fx | BuyCnt=%d | SellCnt=%d | NextBuy=%.2f | NextSell=%.2f",
-                  g_state.basketId, scale, g_state.buyLayerCounter, g_state.sellLayerCounter, GetNextBuyLot(), GetNextSellLot());
+      PrintFormat("[OurOBoros Vx] Initial Hedge Confirmed | BasketID=%I64d | BuyCnt=%d | SellCnt=%d | NextBuy=%.2f | NextSell=%.2f",
+                  g_state.basketId, g_state.buyLayerCounter, g_state.sellLayerCounter, GetNextBuyLot(), GetNextSellLot());
       return(true);
      }
 
@@ -1283,7 +1238,7 @@ bool AnalyzeMarketMicrostructureAndRegime(MarketAnalysisResult &out)
    else
       out.regime = REGIME_CHOPPY_WHIPSAW;
 
-   //--- 7. Regime-Adaptive Weighted Ensemble
+   //--- 7. Regime-Adaptive Weighted Ensemble (Stable Multi-Indicator Consensus)
    double wTrend = 0.26, wMom = 0.26, wStruct = 0.22, wQuant = 0.14, wTick = 0.12;
    if(out.regime == REGIME_TRENDING_STRONG)
      { wTrend = 0.32; wMom = 0.26; wStruct = 0.20; wQuant = 0.12; wTick = 0.10; }
@@ -1435,8 +1390,6 @@ void ComputeBasketMetrics(BasketMetrics &m)
          m.buyFloatingPnL += (profit + swap + comm);
          if(openPx > m.highestBuyPrice)
             m.highestBuyPrice = openPx;
-         if(m.lowestBuyPrice == 0.0 || openPx < m.lowestBuyPrice)
-            m.lowestBuyPrice = openPx;
          double dist = MathAbs(ask - openPx);
          if(dist < m.nearestBuyDistance)
             m.nearestBuyDistance = dist;
@@ -1447,8 +1400,6 @@ void ComputeBasketMetrics(BasketMetrics &m)
          m.sellVolume += vol;
          sellWeightedSum += openPx * vol;
          m.sellFloatingPnL += (profit + swap + comm);
-         if(openPx > m.highestSellPrice)
-            m.highestSellPrice = openPx;
          if(m.lowestSellPrice == 0.0 || openPx < m.lowestSellPrice)
             m.lowestSellPrice = openPx;
          double dist = MathAbs(bid - openPx);
@@ -1505,20 +1456,22 @@ void ComputeBasketMetrics(BasketMetrics &m)
   }
 
 //+------------------------------------------------------------------+
-//| Full-Lot Hedged Loss Trimming & Slot Recycling Engine            |
+//| Selective Position Optimization (Hedged Pair / Winner-Loser)     |
 //+------------------------------------------------------------------+
 void RunSelectivePositionOptimization()
   {
    if(!InpEnableSelectivePosOpt)
       return;
-   if(g_metrics.buyPositions < 2 || g_metrics.sellPositions < 2)
+   if(g_metrics.buyPositions < 3 || g_metrics.sellPositions < 3)
       return;
 
-   //--- 1. Locate the deepest losing position (any lot size, including 0.05+)
-   ulong worstLossTicket = 0;
-   double worstLossPnL   = 0.0;
-   double worstLossVol   = 0.0;
-   long worstLossType    = -1;
+   ulong bestWinTicket = 0;
+   double bestWinPnL   = 0.0;
+   double bestWinVol   = 0.0;
+   long bestWinType    = -1;
+
+   ulong smallLossTicket = 0;
+   double smallLossPnL   = -1e9;
 
    for(int i = 0; i < PositionsTotal(); i++)
      {
@@ -1537,26 +1490,22 @@ void RunSelectivePositionOptimization()
       double swap = PositionGetDouble(POSITION_SWAP);
       double net  = prof + swap + GetPositionCommission((ulong)posId);
 
-      if(net < worstLossPnL)
+      if(net > bestWinPnL && vol <= 0.03)
         {
-         worstLossPnL    = net;
-         worstLossTicket = ticket;
-         worstLossVol    = vol;
-         worstLossType   = pType;
+         bestWinPnL    = net;
+         bestWinTicket = ticket;
+         bestWinVol    = vol;
+         bestWinType   = pType;
         }
      }
 
-   if(worstLossTicket == 0 || worstLossPnL >= -0.25)
+   if(bestWinTicket == 0 || bestWinPnL <= 0.0)
       return;
-
-   //--- 2. Find an opposite-side winning position of equal volume that covers the loss + net profit
-   ulong bestWinTicket = 0;
-   double bestWinPnL   = 0.0;
 
    for(int j = 0; j < PositionsTotal(); j++)
      {
       ulong ticket = PositionGetTicket(j);
-      if(ticket == 0 || ticket == worstLossTicket)
+      if(ticket == 0 || ticket == bestWinTicket)
          continue;
       if(PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
@@ -1565,7 +1514,7 @@ void RunSelectivePositionOptimization()
 
       long posId = PositionGetInteger(POSITION_IDENTIFIER);
       long pType = PositionGetInteger(POSITION_TYPE);
-      if(pType == worstLossType)
+      if(pType == bestWinType)
          continue;
 
       double vol  = PositionGetDouble(POSITION_VOLUME);
@@ -1573,17 +1522,17 @@ void RunSelectivePositionOptimization()
       double swap = PositionGetDouble(POSITION_SWAP);
       double net  = prof + swap + GetPositionCommission((ulong)posId);
 
-      if(net > 0.0 && MathAbs(vol - worstLossVol) < 0.005 && (net + worstLossPnL) >= 0.15)
+      if(net < 0.0 && (bestWinPnL + net) > 0.05 && MathAbs(vol - bestWinVol) < 0.005)
         {
-         if(net > bestWinPnL)
+         if(net > smallLossPnL)
            {
-            bestWinPnL    = net;
-            bestWinTicket = ticket;
+            smallLossPnL    = net;
+            smallLossTicket = ticket;
            }
         }
      }
 
-   if(bestWinTicket > 0 && worstLossTicket > 0 && (bestWinPnL + worstLossPnL) >= 0.15)
+   if(bestWinTicket > 0 && smallLossTicket > 0 && (bestWinPnL + smallLossPnL) > 0.05)
      {
       g_eaState = STATE_POSITION_OPTIMIZATION;
       g_trade.SetExpertMagicNumber(InpMagicNumber);
@@ -1594,20 +1543,20 @@ void RunSelectivePositionOptimization()
 
       if(InpEnableCloseByOptimization && supportsCloseBy)
         {
-         if(g_trade.PositionCloseBy(bestWinTicket, worstLossTicket))
+         if(g_trade.PositionCloseBy(bestWinTicket, smallLossTicket))
            {
-            PrintFormat("[OurOBoros Vx] Full-Lot CloseBy Trimming | Lot=%.2f | NetGain=+%.2f | Counters Preserved (Buy=%d, Sell=%d)",
-                        worstLossVol, (bestWinPnL + worstLossPnL), g_state.buyLayerCounter, g_state.sellLayerCounter);
+            PrintFormat("[OurOBoros Vx] Selective CloseBy Optimization executed | NetGain=+%.2f | Counters Preserved (Buy=%d, Sell=%d)",
+                        (bestWinPnL + smallLossPnL), g_state.buyLayerCounter, g_state.sellLayerCounter);
             SavePersistentState();
            }
         }
       else
         {
          if(g_trade.PositionClose(bestWinTicket, (ulong)InpSlippagePoints) &&
-            g_trade.PositionClose(worstLossTicket, (ulong)InpSlippagePoints))
+            g_trade.PositionClose(smallLossTicket, (ulong)InpSlippagePoints))
            {
-            PrintFormat("[OurOBoros Vx] Full-Lot Hedged Trimming | Lot=%.2f | NetGain=+%.2f | Counters Preserved (Buy=%d, Sell=%d)",
-                        worstLossVol, (bestWinPnL + worstLossPnL), g_state.buyLayerCounter, g_state.sellLayerCounter);
+            PrintFormat("[OurOBoros Vx] Selective Winner-Loser Pairing executed | NetGain=+%.2f | Counters Preserved (Buy=%d, Sell=%d)",
+                        (bestWinPnL + smallLossPnL), g_state.buyLayerCounter, g_state.sellLayerCounter);
             SavePersistentState();
            }
         }
@@ -1782,7 +1731,7 @@ bool EvaluateBasketExitAndRecovery()
       g_state.protectedProfitFloorPercent = MathMax(g_state.protectedProfitFloorPercent, targetPct);
 
       bool strongMomentumContinuing = InpEnableDynamicProfitExtension
-                                      && (g_market.trendConfidence >= 0.40)
+                                      && (g_market.trendConfidence >= 0.45)
                                       && (g_market.reversalProbability < 0.35)
                                       && ((g_metrics.netExposure > 0.0 && g_market.direction == DIR_BULLISH) ||
                                           (g_metrics.netExposure < 0.0 && g_market.direction == DIR_BEARISH));
@@ -1875,7 +1824,7 @@ bool EvaluateBasketExitAndRecovery()
 //+------------------------------------------------------------------+
 void ProcessPyramidingAndReversal()
   {
-   if(!InpEnableTrendPyramiding)
+   if(!InpEnableUnlimitedLayering || !InpEnableTrendPyramiding)
       return;
    if(g_pauseNewEntries || !g_autoTradingEnabled || g_state.basketClosingActive)
       return;
@@ -1931,11 +1880,10 @@ void ProcessPyramidingAndReversal()
    //--- 3. Anti-Stacking Bullish Trend & Reversal Pyramiding
    if(InpEnableBuy && InpEnableBullishPyramiding && g_market.direction == DIR_BULLISH && !g_market.isPullbackOnly)
      {
-      bool underSlotCap  = (g_metrics.buyPositions < InpMaxOpenPositionsPerSide);
       bool cooldownOk    = ((now - g_lastBuyOrderTime) >= InpMinOrderCooldownSec);
       bool spatialClear  = (g_metrics.buyPositions == 0) || (g_metrics.nearestBuyDistance >= gridDistPrice);
 
-      if(underSlotCap && cooldownOk && spatialClear)
+      if(cooldownOk && spatialClear)
         {
          bool trendUpBreakout   = (g_metrics.buyPositions > 0 && ask >= (g_metrics.highestBuyPrice + gridDistPrice));
          bool lowReversalEntry  = (g_metrics.buyPositions == 0) ||
@@ -1961,11 +1909,10 @@ void ProcessPyramidingAndReversal()
    //--- 4. Anti-Stacking Bearish Trend & Reversal Pyramiding
    if(InpEnableSell && InpEnableBearishPyramiding && g_market.direction == DIR_BEARISH && !g_market.isPullbackOnly)
      {
-      bool underSlotCap  = (g_metrics.sellPositions < InpMaxOpenPositionsPerSide);
       bool cooldownOk    = ((now - g_lastSellOrderTime) >= InpMinOrderCooldownSec);
       bool spatialClear  = (g_metrics.sellPositions == 0) || (g_metrics.nearestSellDistance >= gridDistPrice);
 
-      if(underSlotCap && cooldownOk && spatialClear)
+      if(cooldownOk && spatialClear)
         {
          bool trendDownBreakout = (g_metrics.sellPositions > 0 && bid <= (g_metrics.lowestSellPrice - gridDistPrice));
          bool highReversalEntry = (g_metrics.sellPositions == 0) ||
@@ -2118,7 +2065,7 @@ void UpdateDashboard()
    color cMuted   = C'160,170,185';
 
    CreateRectLabel(UI_PREFIX + "BG", x, y + 26, panelW, panelH, bgDark, cGold);
-   CreateTextLabel(UI_PREFIX + "TITLE", x + 12, y + 34, InpEAName + " V2.03  |  COMPOUNDING ANTI-MARTINGALE", cGold, 10, "Arial Bold");
+   CreateTextLabel(UI_PREFIX + "TITLE", x + 12, y + 34, InpEAName + "  |  BIDIRECTIONAL ANTI-MARTINGALE ENGINE", cGold, 10, "Arial Bold");
 
    string stateStr = EnumToString(g_eaState);
    StringReplace(stateStr, "STATE_", "");
@@ -2143,7 +2090,7 @@ void UpdateDashboard()
    CreateTextLabel(UI_PREFIX + "H_ACC", c1X, rowY, "[ ACCOUNT INFORMATION ]", cGold, 8, "Arial Bold");
    CreateTextLabel(UI_PREFIX + "A1", c1X, rowY + 15, StringFormat("Balance / Equity : %.2f / %.2f", AccountInfoDouble(ACCOUNT_BALANCE), AccountInfoDouble(ACCOUNT_EQUITY)), clrWhite);
    CreateTextLabel(UI_PREFIX + "A2", c1X, rowY + 29, StringFormat("Free / Used Mgn  : %.2f / %.2f", g_metrics.freeMargin, g_metrics.usedMargin), cMuted);
-   CreateTextLabel(UI_PREFIX + "A3", c1X, rowY + 43, StringFormat("Margin Level     : %.1f%% (Min %.0f%%)", g_metrics.marginLevel, InpMinFreeMarginLevelPercent), clrWhite);
+   CreateTextLabel(UI_PREFIX + "A3", c1X, rowY + 43, StringFormat("Margin Level     : %.1f%%", g_metrics.marginLevel), clrWhite);
    CreateTextLabel(UI_PREFIX + "A4", c1X, rowY + 57, StringFormat("Floating P/L     : %+.2f", g_metrics.floatingNetPnL), (g_metrics.floatingNetPnL >= 0.0) ? cGreen : cRed);
    CreateTextLabel(UI_PREFIX + "A5", c1X, rowY + 71, StringFormat("Daily / Weekly   : %+.2f / %+.2f", dailyPnL, weeklyPnL), clrWhite);
    CreateTextLabel(UI_PREFIX + "A6", c1X, rowY + 85, StringFormat("Monthly Realized : %+.2f", monthlyPnL), clrWhite);
@@ -2157,7 +2104,7 @@ void UpdateDashboard()
    CreateRectLabel(UI_PREFIX + "CARD_BSK", c2X - 4, rowY - 2, 254, 152, bgCard, C'45,52,66');
    CreateTextLabel(UI_PREFIX + "H_BSK", c2X, rowY, "[ BASKET INFORMATION ]", cGold, 8, "Arial Bold");
    CreateTextLabel(UI_PREFIX + "B1", c2X, rowY + 15, StringFormat("Basket ID / Age  : #%I64d (%dm)", g_state.basketId % 1000000, ageMin), clrWhite);
-   CreateTextLabel(UI_PREFIX + "B2", c2X, rowY + 29, StringFormat("Start Bal / Scale: %.2f (%.2fx)", g_state.basketStartBalance, GetBasketLotScale()), cMuted);
+   CreateTextLabel(UI_PREFIX + "B2", c2X, rowY + 29, StringFormat("Start Balance    : %.2f", g_state.basketStartBalance), cMuted);
    CreateTextLabel(UI_PREFIX + "B3", c2X, rowY + 43, StringFormat("Basket Net P/L   : %+.2f (%+.2f%%)", g_metrics.basketNetPnL, g_metrics.basketNetPercent), (g_metrics.basketNetPnL >= 0.0) ? cGreen : cRed);
    CreateTextLabel(UI_PREFIX + "B4", c2X, rowY + 57, StringFormat("Target (%.1f%%)    : +%.2f", InpMinimumBasketProfitPercent, targetUsd), cGold);
    CreateTextLabel(UI_PREFIX + "B5", c2X, rowY + 71, StringFormat("Peak / Floor     : %.2f%% / %.2f%%", g_state.peakBasketProfitPercent, g_state.protectedProfitFloorPercent), clrWhite);
@@ -2169,16 +2116,16 @@ void UpdateDashboard()
    int r2Y = rowY + 158;
    CreateRectLabel(UI_PREFIX + "CARD_BUY", c1X - 4, r2Y - 2, 256, 98, bgCard, cGreen);
    CreateTextLabel(UI_PREFIX + "H_BUY", c1X, r2Y, "[ BUY ANTI-MARTINGALE ENGINE ]", cGreen, 8, "Arial Bold");
-   CreateTextLabel(UI_PREFIX + "BUY1", c1X, r2Y + 15, StringFormat("Slots / Vol      : %d/%d | %.2f lots", g_metrics.buyPositions, InpMaxOpenPositionsPerSide, g_metrics.buyVolume), clrWhite);
-   CreateTextLabel(UI_PREFIX + "BUY2", c1X, r2Y + 29, StringFormat("BUY Counter      : %d (Max %.2f)", g_state.buyLayerCounter, GetEffectiveMaxBuyLot()), cGreen);
+   CreateTextLabel(UI_PREFIX + "BUY1", c1X, r2Y + 15, StringFormat("Positions / Vol  : %d / %.2f lots", g_metrics.buyPositions, g_metrics.buyVolume), clrWhite);
+   CreateTextLabel(UI_PREFIX + "BUY2", c1X, r2Y + 29, StringFormat("BUY Counter      : %d (Max %.2f)", g_state.buyLayerCounter, InpMaximumBuyLot), cGreen);
    CreateTextLabel(UI_PREFIX + "BUY3", c1X, r2Y + 43, StringFormat("Last / Next Lot  : %.2f -> %.2f", g_state.lastBuyLot, GetNextBuyLot()), clrWhite);
    CreateTextLabel(UI_PREFIX + "BUY4", c1X, r2Y + 57, StringFormat("BUY Floating P/L : %+.2f", g_metrics.buyFloatingPnL), (g_metrics.buyFloatingPnL >= 0.0) ? cGreen : cRed);
    CreateTextLabel(UI_PREFIX + "BUY5", c1X, r2Y + 71, StringFormat("BUY Avg Entry    : %.5f", g_metrics.buyWeightedAvgPrice), cMuted);
 
    CreateRectLabel(UI_PREFIX + "CARD_SELL", c2X - 4, r2Y - 2, 254, 98, bgCard, cRed);
    CreateTextLabel(UI_PREFIX + "H_SELL", c2X, r2Y, "[ SELL ANTI-MARTINGALE ENGINE ]", cRed, 8, "Arial Bold");
-   CreateTextLabel(UI_PREFIX + "SELL1", c2X, r2Y + 15, StringFormat("Slots / Vol      : %d/%d | %.2f lots", g_metrics.sellPositions, InpMaxOpenPositionsPerSide, g_metrics.sellVolume), clrWhite);
-   CreateTextLabel(UI_PREFIX + "SELL2", c2X, r2Y + 29, StringFormat("SELL Counter     : %d (Max %.2f)", g_state.sellLayerCounter, GetEffectiveMaxSellLot()), cRed);
+   CreateTextLabel(UI_PREFIX + "SELL1", c2X, r2Y + 15, StringFormat("Positions / Vol  : %d / %.2f lots", g_metrics.sellPositions, g_metrics.sellVolume), clrWhite);
+   CreateTextLabel(UI_PREFIX + "SELL2", c2X, r2Y + 29, StringFormat("SELL Counter     : %d (Max %.2f)", g_state.sellLayerCounter, InpMaximumSellLot), cRed);
    CreateTextLabel(UI_PREFIX + "SELL3", c2X, r2Y + 43, StringFormat("Last / Next Lot  : %.2f -> %.2f", g_state.lastSellLot, GetNextSellLot()), clrWhite);
    CreateTextLabel(UI_PREFIX + "SELL4", c2X, r2Y + 57, StringFormat("SELL Floating P/L: %+.2f", g_metrics.sellFloatingPnL), (g_metrics.sellFloatingPnL >= 0.0) ? cGreen : cRed);
    CreateTextLabel(UI_PREFIX + "SELL5", c2X, r2Y + 71, StringFormat("SELL Avg Entry   : %.5f", g_metrics.sellWeightedAvgPrice), cMuted);
@@ -2278,7 +2225,7 @@ int OnInit()
    EventSetMillisecondTimer(MathMax(100, InpDashboardUpdateMs));
    UpdateDashboard();
 
-   PrintFormat("[OurOBoros Vx] Initialized V2.03 on %s (%s) | Magic=%I64u | Filling=%d",
+   PrintFormat("[OurOBoros Vx] Initialized successfully on %s (%s) | Magic=%I64u | Filling=%d",
                _Symbol, EnumToString(InpTradingTimeframe), InpMagicNumber, (int)g_fillingMode);
    return(INIT_SUCCEEDED);
   }
