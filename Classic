@@ -1,1 +1,29 @@
+# Classic — status backtest Quantum Trading Engine 1.04
 
+**26 November 2026 · Status: gagal validasi pada backtest XAUUSDm M1. Gunakan build ini hanya untuk investigasi di Strategy Tester.**
+
+Sumber EA versi 1.04 ada di [Vulcares_Vx.mq5](./Vulcares_Vx.mq5). Git blob `fda3a62add42ecf494d1d6e22398c9fb39b9598a` cocok dengan file `QTE_104_Backtest.mq5` yang diserahkan.
+
+## Hasil yang dilaporkan
+
+| Metrik | Nilai |
+| --- | ---: |
+| Modal awal | 1.000,00 |
+| Rugi bersih | −967,22 |
+| Saldo akhir, dihitung dari modal awal dan rugi bersih | 32,78 |
+| Profit factor | 0,92 |
+| Drawdown ekuitas maksimum | sekitar 98% |
+
+Angka diambil dari tangkapan layar laporan MT5 pengguna. File laporan lengkap, daftar deal, setelan biaya, dan parameter run masih diperlukan untuk mereproduksi hasil dan mengatribusikan kerugian per strategi.
+
+## Temuan risiko
+
+Kode mengatur batas harian hingga 20% dan batas per transaksi hingga 4% atau 5%, bergantung pada mode. Penguncian harian dapat berakhir pada hari server broker berikutnya setelah posisi dan order selesai. Kerugian dapat terakumulasi lintas hari. Profit factor 0,92 menunjukkan laba kotor dalam run ini lebih kecil daripada rugi kotor.
+
+Revisi 1.04 memperbaiki jalur entry di Strategy Tester. Revisi tersebut belum membuktikan keunggulan strategi, rasio reward bersih, atau target win rate 60%.
+
+## Bukti yang masih diperlukan
+
+- Laporan lengkap dari backtest yang sama, daftar deal atau transaksi, dan konfigurasi `.set`.
+- Perincian hasil bersih per strategi dan rezim setelah spread, komisi, slippage, dan swap.
+- Verifikasi batas drawdown lintas hari dan pengujian ulang pada holdout yang telah ditentukan sebelum evaluasi.
