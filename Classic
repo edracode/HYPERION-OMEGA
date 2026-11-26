@@ -1,10 +1,27 @@
-# Classic — status backtest Quantum Trading Engine 1.04
+# Classic — Quantum Trading Engine 1.05
+
+**Versi terbaru** [QTE_105_Backtest.mq5](./QTE_105_Backtest.mq5) · 26 November 2026
+
+Revisi ini memperbaiki kontrol risiko setelah hasil XAUUSDm M1 pada versi 1.04. Jalankan 1.05 di Strategy Tester dengan input bawaan baru. Mode `Symbols=AUTO` memakai simbol tester, dan `Symbols=*` memindai simbol broker yang tersedia.
+
+| Kontrol | Batas 1.05 |
+| --- | --- |
+| Risiko per transaksi | Mode 0,5% atau sampai 1%, dengan mode adaptif sebagai default |
+| Risiko harian | Maks. 3% |
+| Drawdown dari puncak ekuitas selama satu backtest | Maks. 10% sebagai pemicu penutupan dan penguncian sampai backtest berakhir |
+| Akun | Strategy Tester |
+
+EA mengurangi anggaran entry berdasarkan estimasi sisa kerugian posisi terbuka sampai stop. Gap dan slippage masih dapat membawa drawdown aktual melewati ambang. Gunakan input bawaan baru karena preset 4%/5% dan 20% ditolak. Jalur tester masih dapat menjalankan uji eksekusi dengan biaya belum dikonfirmasi. Kriteria metrik menolak hasil tanpa konfirmasi biaya dan mengecek jumlah transaksi, win rate, laba bersih, profit factor, dan drawdown.
+
+Uji lokal mencakup penguncian drawdown lintas hari, kenaikan puncak ekuitas, dan penolakan eksekusi di luar Tester. Kompilasi MetaEditor, backtest 1.05, dan profitabilitas belum terverifikasi. Logika sinyal 1.04 masih dipakai untuk mengisolasi efek perbaikan risiko. Penyesuaian sinyal memerlukan data deal dan validasi pada periode independen.
+
+## Riwayat backtest 1.04
 
 **26 November 2026 · Status: gagal validasi pada backtest XAUUSDm M1. Gunakan build ini hanya untuk investigasi di Strategy Tester.**
 
 Sumber EA versi 1.04 ada di [Vulcares_Vx.mq5](./Vulcares_Vx.mq5). Git blob `fda3a62add42ecf494d1d6e22398c9fb39b9598a` cocok dengan file `QTE_104_Backtest.mq5` yang diserahkan.
 
-## Hasil yang dilaporkan
+### Hasil yang dilaporkan
 
 | Metrik | Nilai |
 | --- | ---: |
@@ -16,13 +33,13 @@ Sumber EA versi 1.04 ada di [Vulcares_Vx.mq5](./Vulcares_Vx.mq5). Git blob `fda3
 
 Angka diambil dari tangkapan layar laporan MT5 pengguna. File laporan lengkap, daftar deal, setelan biaya, dan parameter run masih diperlukan untuk mereproduksi hasil dan mengatribusikan kerugian per strategi.
 
-## Temuan risiko
+### Temuan risiko
 
 Kode mengatur batas harian hingga 20% dan batas per transaksi hingga 4% atau 5%, bergantung pada mode. Penguncian harian dapat berakhir pada hari server broker berikutnya setelah posisi dan order selesai. Kerugian dapat terakumulasi lintas hari. Profit factor 0,92 menunjukkan laba kotor dalam run ini lebih kecil daripada rugi kotor.
 
 Revisi 1.04 memperbaiki jalur entry di Strategy Tester. Revisi tersebut belum membuktikan keunggulan strategi, rasio reward bersih, atau target win rate 60%.
 
-## Bukti yang masih diperlukan
+### Bukti yang masih diperlukan
 
 - Laporan lengkap dari backtest yang sama, daftar deal atau transaksi, dan konfigurasi `.set`.
 - Perincian hasil bersih per strategi dan rezim setelah spread, komisi, slippage, dan swap.
