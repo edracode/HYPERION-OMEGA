@@ -1295,6 +1295,28 @@ bool AnalyzeMarketMicrostructureAndRegime(MarketAnalysisResult &out)
   }
 
 //+------------------------------------------------------------------+
+//| Helper: Retrieve Position Entry Commission From Deal History     |
+//+------------------------------------------------------------------+
+double GetPositionCommission(ulong posId)
+  {
+   if(posId == 0 || !HistorySelectByPosition(posId))
+      return(0.0);
+
+   double totalComm = 0.0;
+   int totalDeals = HistoryDealsTotal();
+   for(int i = 0; i < totalDeals; i++)
+     {
+      ulong dealTicket = HistoryDealGetTicket(i);
+      if(dealTicket == 0)
+         continue;
+      long entry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_IN || entry == DEAL_ENTRY_INOUT)
+         totalComm += HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+     }
+   return(totalComm);
+  }
+
+//+------------------------------------------------------------------+
 //| Real-Time Basket Metrics, Cost & Break-Even Calculator           |
 //+------------------------------------------------------------------+
 void ComputeBasketMetrics(BasketMetrics &m)
@@ -1323,12 +1345,13 @@ void ComputeBasketMetrics(BasketMetrics &m)
       if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
          continue;
 
+      long posId    = PositionGetInteger(POSITION_IDENTIFIER);
       long posType  = PositionGetInteger(POSITION_TYPE);
       double vol    = PositionGetDouble(POSITION_VOLUME);
       double openPx = PositionGetDouble(POSITION_PRICE_OPEN);
       double profit = PositionGetDouble(POSITION_PROFIT);
       double swap   = PositionGetDouble(POSITION_SWAP);
-      double comm   = PositionGetDouble(POSITION_COMMISSION);
+      double comm   = GetPositionCommission((ulong)posId);
 
       if(vol > 0.0 && MathAbs(comm) > 0.0)
         {
@@ -1432,9 +1455,12 @@ void RunSelectivePositionOptimization()
       if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
          continue;
 
-      long pType = PositionGetInteger(POSITION_TYPE);
-      double vol = PositionGetDouble(POSITION_VOLUME);
-      double net = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP) + PositionGetDouble(POSITION_COMMISSION);
+      long posId  = PositionGetInteger(POSITION_IDENTIFIER);
+      long pType  = PositionGetInteger(POSITION_TYPE);
+      double vol  = PositionGetDouble(POSITION_VOLUME);
+      double prof = PositionGetDouble(POSITION_PROFIT);
+      double swap = PositionGetDouble(POSITION_SWAP);
+      double net  = prof + swap + GetPositionCommission((ulong)posId);
 
       if(net > bestWinPnL && vol <= 0.03)
         {
@@ -1458,12 +1484,15 @@ void RunSelectivePositionOptimization()
       if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
          continue;
 
+      long posId = PositionGetInteger(POSITION_IDENTIFIER);
       long pType = PositionGetInteger(POSITION_TYPE);
       if(pType == bestWinType)
          continue;
 
-      double vol = PositionGetDouble(POSITION_VOLUME);
-      double net = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP) + PositionGetDouble(POSITION_COMMISSION);
+      double vol  = PositionGetDouble(POSITION_VOLUME);
+      double prof = PositionGetDouble(POSITION_PROFIT);
+      double swap = PositionGetDouble(POSITION_SWAP);
+      double net  = prof + swap + GetPositionCommission((ulong)posId);
 
       if(net < 0.0 && (bestWinPnL + net) > 0.05 && MathAbs(vol - bestWinVol) < 0.005)
         {
