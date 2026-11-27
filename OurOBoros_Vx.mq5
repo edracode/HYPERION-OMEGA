@@ -1,4 +1,3 @@
-
 //+------------------------------------------------------------------+
 //|                                                 OurOBoros_Vx.mq5 |
 //|                     OurOBoros Quantitative Engineering Division  |
@@ -245,6 +244,7 @@ BasketMetrics        g_metrics;
 bool                 g_autoTradingEnabled     = true;
 bool                 g_pauseNewEntries        = false;
 bool                 g_resetWhenFlatRequested = false;
+bool                 g_manualReEntryRequested = false;
 bool                 g_panelVisible           = true;
 
 //--- Historical & Telemetry Statistics
@@ -296,6 +296,7 @@ string               g_stateFileName          = "";
 #define BTN_RESUME   "OBVX_BTN_RESUME"
 #define BTN_CLOSEALL "OBVX_BTN_CLOSEALL"
 #define BTN_RESET    "OBVX_BTN_RESET"
+#define BTN_REENTRY  "OBVX_BTN_REENTRY"
 #define BTN_TOGGLE   "OBVX_BTN_TOGGLE"
 
 //+------------------------------------------------------------------+
@@ -1675,6 +1676,17 @@ bool ExecuteIntelligentCloseAll(string closeReason, bool isRecoveryExit)
    g_eaState = STATE_BASKET_RESET;
    InitializeNewBasketCycle();
 
+   if(g_manualReEntryRequested)
+     {
+      g_manualReEntryRequested = false;
+      g_resetWhenFlatRequested = false;
+      g_pauseNewEntries        = false;
+      g_autoTradingEnabled     = true;
+      g_eaState                = STATE_AUTOMATIC_RE_ENTRY;
+      ExecuteInitialDualEntry();
+      return(true);
+     }
+
    if(g_resetWhenFlatRequested)
      {
       g_resetWhenFlatRequested = false;
@@ -2056,7 +2068,7 @@ void UpdateDashboard()
      }
 
    int panelW = 540;
-   int panelH = 445;
+   int panelH = 474;
    color bgDark   = C'14,17,23';
    color bgCard   = C'22,27,36';
    color cGold    = C'212,175,55';
@@ -2157,12 +2169,14 @@ void UpdateDashboard()
    CreateTextLabel(UI_PREFIX + "R4", c2X, r3Y + 57, StringFormat("Max Recov Loss   : -%.2f%%", InpMaximumRecoveryLossPercent), clrWhite);
    CreateTextLabel(UI_PREFIX + "R5", c2X, r3Y + 71, StringFormat("Recov Baskets    : %d (%.0f%%)", g_completedRecoveryBaskets, recSuccessRate), clrWhite);
 
-   int btnY = r3Y + 105;
-   CreateActionButton(BTN_AUTO,     c1X,       btnY, 96,  24, g_autoTradingEnabled ? "AUTO: ON" : "AUTO: OFF", g_autoTradingEnabled ? C'22,101,52' : C'127,29,29', clrWhite);
-   CreateActionButton(BTN_PAUSE,    c1X + 101, btnY, 102, 24, "PAUSE ENTRIES", g_pauseNewEntries ? C'180,83,9' : C'30,41,59', clrWhite);
-   CreateActionButton(BTN_RESUME,   c1X + 208, btnY, 96,  24, "RESUME", C'30,41,59', cGreen);
-   CreateActionButton(BTN_CLOSEALL, c1X + 309, btnY, 102, 24, "CLOSE ALL EA", C'153,27,27', clrWhite);
-   CreateActionButton(BTN_RESET,    c1X + 416, btnY, 100, 24, g_resetWhenFlatRequested ? "RESETTING..." : "RESET FLAT", C'30,41,59', cAmber);
+   int btnY  = r3Y + 105;
+   int btnY2 = btnY + 29;
+   CreateActionButton(BTN_AUTO,     c1X,       btnY,  96,  24, g_autoTradingEnabled ? "AUTO: ON" : "AUTO: OFF", g_autoTradingEnabled ? C'22,101,52' : C'127,29,29', clrWhite);
+   CreateActionButton(BTN_PAUSE,    c1X + 101, btnY,  102, 24, "PAUSE ENTRIES", g_pauseNewEntries ? C'180,83,9' : C'30,41,59', clrWhite);
+   CreateActionButton(BTN_RESUME,   c1X + 208, btnY,  96,  24, "RESUME", C'30,41,59', cGreen);
+   CreateActionButton(BTN_CLOSEALL, c1X + 309, btnY,  102, 24, "CLOSE ALL EA", C'153,27,27', clrWhite);
+   CreateActionButton(BTN_RESET,    c1X + 416, btnY,  100, 24, g_resetWhenFlatRequested ? "RESETTING..." : "RESET FLAT", C'30,41,59', cAmber);
+   CreateActionButton(BTN_REENTRY,  c1X,       btnY2, 516, 24, "RESET & RE-ENTRY (NEW CYCLE 0.01)", C'26,54,93', cGold);
 
    ChartRedraw(0);
   }
@@ -2284,6 +2298,15 @@ void OnTick()
       else
         {
          InitializeNewBasketCycle();
+         if(g_manualReEntryRequested)
+           {
+            g_manualReEntryRequested = false;
+            g_resetWhenFlatRequested = false;
+            g_pauseNewEntries        = false;
+            g_autoTradingEnabled     = true;
+            g_eaState                = STATE_AUTOMATIC_RE_ENTRY;
+            ExecuteInitialDualEntry();
+           }
         }
      }
 
@@ -2446,6 +2469,16 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       g_resetWhenFlatRequested = !g_resetWhenFlatRequested;
       ObjectSetInteger(0, BTN_RESET, OBJPROP_STATE, false);
       PrintFormat("[OurOBoros Vx] Dashboard Button: RESET WHEN FLAT = %s", g_resetWhenFlatRequested ? "ARMED" : "CANCELLED");
+      g_lastDashboardUpdateMs = 0;
+      UpdateDashboard();
+     }
+   else if(sparam == BTN_REENTRY)
+     {
+      ObjectSetInteger(0, BTN_REENTRY, OBJPROP_STATE, false);
+      g_manualReEntryRequested = true;
+      Print("[OurOBoros Vx] Dashboard Button: MANUAL BASKET RESET & AUTOMATIC RE-ENTRY (0.01) TRIGGERED.");
+      ComputeBasketMetrics(g_metrics);
+      ExecuteIntelligentCloseAll("MANUAL_RESET_AND_REENTRY", false);
       g_lastDashboardUpdateMs = 0;
       UpdateDashboard();
      }
