@@ -290,14 +290,15 @@ string               g_gvPrefix               = "";
 string               g_stateFileName          = "";
 
 //--- UI Constants
-#define UI_PREFIX    "OBVX_"
-#define BTN_AUTO     "OBVX_BTN_AUTO"
-#define BTN_PAUSE    "OBVX_BTN_PAUSE"
-#define BTN_RESUME   "OBVX_BTN_RESUME"
-#define BTN_CLOSEALL "OBVX_BTN_CLOSEALL"
-#define BTN_RESET    "OBVX_BTN_RESET"
-#define BTN_REENTRY  "OBVX_BTN_REENTRY"
-#define BTN_TOGGLE   "OBVX_BTN_TOGGLE"
+#define UI_PREFIX     "OBVX_"
+#define BTN_AUTO      "OBVX_BTN_AUTO"
+#define BTN_PAUSE     "OBVX_BTN_PAUSE"
+#define BTN_RESUME    "OBVX_BTN_RESUME"
+#define BTN_CLOSEALL  "OBVX_BTN_CLOSEALL"
+#define BTN_RESET     "OBVX_BTN_RESET"
+#define BTN_REENTRY   "OBVX_BTN_REENTRY"
+#define BTN_RESET_PNL "OBVX_BTN_RESET_PNL"
+#define BTN_TOGGLE    "OBVX_BTN_TOGGLE"
 
 //+------------------------------------------------------------------+
 //| Helper: Check if Order Ticket Already Counted as a Logical Layer |
@@ -2068,7 +2069,7 @@ void UpdateDashboard()
      }
 
    int panelW = 540;
-   int panelH = 474;
+   int panelH = 503;
    color bgDark   = C'14,17,23';
    color bgCard   = C'22,27,36';
    color cGold    = C'212,175,55';
@@ -2171,12 +2172,14 @@ void UpdateDashboard()
 
    int btnY  = r3Y + 105;
    int btnY2 = btnY + 29;
-   CreateActionButton(BTN_AUTO,     c1X,       btnY,  96,  24, g_autoTradingEnabled ? "AUTO: ON" : "AUTO: OFF", g_autoTradingEnabled ? C'22,101,52' : C'127,29,29', clrWhite);
-   CreateActionButton(BTN_PAUSE,    c1X + 101, btnY,  102, 24, "PAUSE ENTRIES", g_pauseNewEntries ? C'180,83,9' : C'30,41,59', clrWhite);
-   CreateActionButton(BTN_RESUME,   c1X + 208, btnY,  96,  24, "RESUME", C'30,41,59', cGreen);
-   CreateActionButton(BTN_CLOSEALL, c1X + 309, btnY,  102, 24, "CLOSE ALL EA", C'153,27,27', clrWhite);
-   CreateActionButton(BTN_RESET,    c1X + 416, btnY,  100, 24, g_resetWhenFlatRequested ? "RESETTING..." : "RESET FLAT", C'30,41,59', cAmber);
-   CreateActionButton(BTN_REENTRY,  c1X,       btnY2, 516, 24, "RESET & RE-ENTRY (NEW CYCLE 0.01)", C'26,54,93', cGold);
+   int btnY3 = btnY2 + 29;
+   CreateActionButton(BTN_AUTO,      c1X,       btnY,  96,  24, g_autoTradingEnabled ? "AUTO: ON" : "AUTO: OFF", g_autoTradingEnabled ? C'22,101,52' : C'127,29,29', clrWhite);
+   CreateActionButton(BTN_PAUSE,     c1X + 101, btnY,  102, 24, "PAUSE ENTRIES", g_pauseNewEntries ? C'180,83,9' : C'30,41,59', clrWhite);
+   CreateActionButton(BTN_RESUME,    c1X + 208, btnY,  96,  24, "RESUME", C'30,41,59', cGreen);
+   CreateActionButton(BTN_CLOSEALL,  c1X + 309, btnY,  102, 24, "CLOSE ALL EA", C'153,27,27', clrWhite);
+   CreateActionButton(BTN_RESET,     c1X + 416, btnY,  100, 24, g_resetWhenFlatRequested ? "RESETTING..." : "RESET FLAT", C'30,41,59', cAmber);
+   CreateActionButton(BTN_REENTRY,   c1X,       btnY2, 516, 24, "RESET & RE-ENTRY (NEW CYCLE 0.01)", C'26,54,93', cGold);
+   CreateActionButton(BTN_RESET_PNL, c1X,       btnY3, 516, 24, "RESET BASKET NET P/L", C'38,48,64', cAmber);
 
    ChartRedraw(0);
   }
@@ -2479,6 +2482,23 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       Print("[OurOBoros Vx] Dashboard Button: MANUAL BASKET RESET & AUTOMATIC RE-ENTRY (0.01) TRIGGERED.");
       ComputeBasketMetrics(g_metrics);
       ExecuteIntelligentCloseAll("MANUAL_RESET_AND_REENTRY", false);
+      g_lastDashboardUpdateMs = 0;
+      UpdateDashboard();
+     }
+   else if(sparam == BTN_RESET_PNL)
+     {
+      ObjectSetInteger(0, BTN_RESET_PNL, OBJPROP_STATE, false);
+      ComputeBasketMetrics(g_metrics);
+      g_state.realizedBasketPnL           = -(g_metrics.floatingNetPnL - g_metrics.estimatedExitCosts);
+      g_state.peakBasketProfitDollars     = 0.0;
+      g_state.peakBasketProfitPercent     = 0.0;
+      g_state.protectedProfitFloorPercent = InpMinimumBasketProfitPercent;
+      g_state.lastProfitImprovementTime   = TimeCurrent();
+      g_state.bestObservedProfitPercent   = -999.0;
+      g_state.profitTrailingActive        = false;
+      SavePersistentState();
+      ComputeBasketMetrics(g_metrics);
+      PrintFormat("[OurOBoros Vx] Dashboard Button: BASKET NET P/L RESET TO 0.00 (RealizedOffset=%.2f).", g_state.realizedBasketPnL);
       g_lastDashboardUpdateMs = 0;
       UpdateDashboard();
      }
